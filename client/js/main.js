@@ -57,6 +57,7 @@
     function hideMentionDropdown() {
         if (mentionDropdown) mentionDropdown.classList.add('hidden');
         mentionStartPos = -1;
+        cachedLayers = null; // refresh layer list on next @
     }
 
     function showMentionDropdown(layers, filter) {
@@ -129,15 +130,19 @@
         hideMentionDropdown();
     }
 
+    var cachedLayers = null;
+
     function fetchAndShowMentions(filter) {
-        getSelectedLayers().then(function(sel) {
-            // Get all layers via context for the full list
-            return getAEContext().then(function(ctx) {
-                var layers = (ctx.allLayers || []).map(function(l) {
-                    return { name: l.name, type: l.type };
-                });
-                showMentionDropdown(layers, filter);
+        // Use cached layers if available (cached at @ trigger time)
+        if (cachedLayers) {
+            showMentionDropdown(cachedLayers, filter);
+            return;
+        }
+        getAEContext().then(function(ctx) {
+            cachedLayers = (ctx.allLayers || []).map(function(l) {
+                return { name: l.name, type: l.type };
             });
+            showMentionDropdown(cachedLayers, filter);
         }).catch(function() {});
     }
 
@@ -452,7 +457,7 @@
         var apiKey = getApiKey();
         isProcessing = true;
         hideCodePreview();
-        appendMessage('system', '正在获取 AE 项目信息...');
+        appendStatus('正在获取 AE 项目信息...');
 
         getAEContext()
             .then(function(context) {
@@ -499,7 +504,7 @@
 
         var codeBeingExecuted = lastGeneratedCode;
         executeBtn.disabled = true;
-        appendMessage('system', '正在执行代码...');
+        appendStatus('正在执行代码...');
 
         executeInAE(lastGeneratedCode)
             .then(function(result) {
@@ -605,15 +610,28 @@
             '</div></div>';
     }
 
+    // Status messages are transient progress indicators (".status" class).
+    // Regular system messages (settings saved, queue notice) are permanent.
+    function appendStatus(text) {
+        var div = document.createElement('div');
+        div.className = 'message system status';
+        var bubble = document.createElement('div');
+        bubble.className = 'bubble';
+        bubble.textContent = text;
+        div.appendChild(bubble);
+        chatHistory.appendChild(div);
+        scrollToBottom();
+    }
+
     function updateLastSystemMessage(text) {
-        var msgs = chatHistory.querySelectorAll('.message.system');
+        var msgs = chatHistory.querySelectorAll('.message.system.status');
         if (msgs.length > 0) {
             msgs[msgs.length - 1].querySelector('.bubble').textContent = text;
         }
     }
 
     function removeLastSystemMessage() {
-        var msgs = chatHistory.querySelectorAll('.message.system');
+        var msgs = chatHistory.querySelectorAll('.message.system.status');
         if (msgs.length > 0) {
             msgs[msgs.length - 1].remove();
         }

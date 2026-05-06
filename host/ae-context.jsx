@@ -1,50 +1,7 @@
 // ae-context.jsx - ExtendScript bridge for Claude AE Assistant
 
-// Inline JSON polyfill (ExtendScript is ES3, no native JSON)
-if (typeof JSON === 'undefined') {
-    var JSON = {};
-}
-(function () {
-    if (typeof JSON.stringify !== 'function') {
-        JSON.stringify = function (value) {
-            var type = typeof value;
-            if (type === 'string') {
-                return '"' + value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\t/g, '\\t') + '"';
-            }
-            if (type === 'number' || type === 'boolean') {
-                return String(value);
-            }
-            if (value === null || value === undefined) {
-                return 'null';
-            }
-            if (value instanceof Array) {
-                var arrParts = [];
-                for (var i = 0; i < value.length; i++) {
-                    arrParts.push(JSON.stringify(value[i]));
-                }
-                return '[' + arrParts.join(',') + ']';
-            }
-            if (type === 'object') {
-                var objParts = [];
-                for (var k in value) {
-                    if (value.hasOwnProperty(k)) {
-                        var v = JSON.stringify(value[k]);
-                        if (v !== undefined) {
-                            objParts.push('"' + k + '":' + v);
-                        }
-                    }
-                }
-                return '{' + objParts.join(',') + '}';
-            }
-            return undefined;
-        };
-    }
-    if (typeof JSON.parse !== 'function') {
-        JSON.parse = function (text) {
-            return eval('(' + text + ')');
-        };
-    }
-})();
+// AE 16.0+ ships native JSON. json2.jsx self-guards against overwriting it.
+//@include "json2.jsx"
 
 function getLayerType(layer) {
     try {

@@ -85,9 +85,8 @@ function abortCurrentRequest() {
 }
 
 function callClaudeAPI(userMessage, aeContext, apiKey, model, images) {
-    var contextStr = '当前 AE 项目状态：\n' + JSON.stringify(aeContext, null, 2);
-    var fullText = contextStr + '\n\n用户请求：' + userMessage;
-
+    // Build content blocks for THIS turn (with images + context). These get persisted
+    // to history but stripped to text-only on subsequent sends to avoid token bloat.
     var contentBlocks = [];
 
     if (images && images.length > 0) {
@@ -103,14 +102,26 @@ function callClaudeAPI(userMessage, aeContext, apiKey, model, images) {
         }
     }
 
-    contentBlocks.push({ type: 'text', text: fullText });
+    contentBlocks.push({ type: 'text', text: userMessage });
 
-    conversationMessages.push({ role: 'user', content: contentBlocks });
+    // Persistent history: just the user's text + assistant replies. No images, no context.
+    conversationMessages.push({ role: 'user', content: userMessage });
 
     // Keep last 10 messages to avoid token limit
     if (conversationMessages.length > 10) {
         conversationMessages = conversationMessages.slice(-10);
     }
+
+    // Build the request: history + the current turn (with images + fresh context).
+    // The current-turn message replaces the just-pushed text-only one.
+    var contextStr = '[当前 AE 项目状态]\n' + JSON.stringify(aeContext, null, 2);
+    var requestMessages = conversationMessages.slice(0, -1);
+    var currentTurn = contentBlocks.slice();
+    currentTurn[currentTurn.length - 1] = {
+        type: 'text',
+        text: contextStr + '\n\n[用户请求]\n' + userMessage
+    };
+    requestMessages.push({ role: 'user', content: currentTurn });
 
     var endpoint = getApiEndpoint();
     currentAbortController = new AbortController();
@@ -126,7 +137,7 @@ function callClaudeAPI(userMessage, aeContext, apiKey, model, images) {
             model: model || 'claude-opus-4-7',
             max_tokens: 4096,
             system: SYSTEM_PROMPT,
-            messages: conversationMessages
+            messages: requestMessages
         }),
         signal: currentAbortController.signal
     })
