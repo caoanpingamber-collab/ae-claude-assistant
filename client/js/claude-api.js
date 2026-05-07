@@ -159,25 +159,11 @@ function callClaudeOneShot(textPrompt, images, apiKey, model) {
     .then(function(d) { return d.content[0].text; });
 }
 
-// Main API call with tool use, extended thinking, and auto-retry on tool errors
-// callbacks = { onStatus(text), onToolCall({name, args, result}), onComplete(text) }
+// Main API call: routes to Anthropic or OpenAI-compatible based on provider setting.
 function callClaudeAPI(userMessage, aeContext, apiKey, model, images, callbacks) {
     callbacks = callbacks || {};
     var status = callbacks.onStatus || function() {};
-
     var safeUserMessage = (userMessage && userMessage.trim()) ? userMessage : '(请参考附图)';
-
-    var initialContent = [];
-    if (images && images.length > 0) {
-        for (var i = 0; i < images.length; i++) {
-            initialContent.push({
-                type: 'image',
-                source: { type: 'base64', media_type: images[i].mediaType, data: images[i].data }
-            });
-        }
-    }
-    var contextStr = '[当前 AE 项目状态]\n' + JSON.stringify(aeContext, null, 2);
-    initialContent.push({ type: 'text', text: contextStr + '\n\n[用户请求]\n' + safeUserMessage });
 
     // Persistent history: text-only summary
     conversationMessages.push({ role: 'user', content: safeUserMessage });
@@ -188,19 +174,39 @@ function callClaudeAPI(userMessage, aeContext, apiKey, model, images, callbacks)
         return false;
     });
 
-    // requestMessages: full message array sent to API (mutated through tool loop)
-    var requestMessages = conversationMessages.slice(0, -1);
-    requestMessages.push({ role: 'user', content: initialContent });
-
     currentAbortController = new AbortController();
+    var provider = (typeof getProvider === 'function') ? getProvider() : 'anthropic';
 
-    return runToolLoop(requestMessages, apiKey, model, status, callbacks).then(function(finalText) {
+    var promise = (provider === 'openai')
+        ? runOpenAIToolLoop(conversationMessages, aeContext, safeUserMessage, images, apiKey, model, status, callbacks)
+        : runAnthropicToolLoop(conversationMessages, aeContext, safeUserMessage, images, apiKey, model, status, callbacks);
+
+    return promise.then(function(finalText) {
         currentAbortController = null;
         conversationMessages.push({ role: 'assistant', content: finalText });
         persistConversationMessages();
         if (callbacks.onComplete) callbacks.onComplete(finalText);
         return finalText;
     });
+}
+
+function runAnthropicToolLoop(history, aeContext, userMessage, images, apiKey, model, status, callbacks) {
+    var initialContent = [];
+    if (images && images.length > 0) {
+        for (var i = 0; i < images.length; i++) {
+            initialContent.push({
+                type: 'image',
+                source: { type: 'base64', media_type: images[i].mediaType, data: images[i].data }
+            });
+        }
+    }
+    var contextStr = '[当前 AE 项目状态]\n' + JSON.stringify(aeContext, null, 2);
+    initialContent.push({ type: 'text', text: contextStr + '\n\n[用户请求]\n' + userMessage });
+
+    var requestMessages = history.slice(0, -1);
+    requestMessages.push({ role: 'user', content: initialContent });
+
+    return runToolLoop(requestMessages, apiKey, model, status, callbacks);
 }
 
 function runToolLoop(requestMessages, apiKey, model, status, callbacks) {
@@ -283,6 +289,115 @@ function runToolLoop(requestMessages, apiKey, model, status, callbacks) {
                     }
                 }
                 return text;
+            }
+        });
+    }
+
+    return iterate();
+}
+
+// === OpenAI-compatible (chat completions) tool loop ===
+// Works with OpenAI API, Codex CLI server, LM Studio, vLLM, Ollama with openai compat,
+// and any third-party OpenAI-format gateway.
+
+function openaiTools() {
+    return TOOLS.map(function(t) {
+        return {
+            type: 'function',
+            function: {
+                name: t.name,
+                description: t.description,
+                parameters: t.input_schema
+            }
+        };
+    });
+}
+
+function runOpenAIToolLoop(history, aeContext, userMessage, images, apiKey, model, status, callbacks) {
+    var endpoint = getApiEndpoint();
+    var iteration = 0;
+    var MAX_ITERATIONS = 8;
+
+    // Build initial messages: system + history (user/assistant text-only) + this turn (images + context + user)
+    var msgs = [{ role: 'system', content: SYSTEM_PROMPT }];
+    var historyMinusLast = history.slice(0, -1);
+    for (var h = 0; h < historyMinusLast.length; h++) {
+        msgs.push({
+            role: historyMinusLast[h].role,
+            content: typeof historyMinusLast[h].content === 'string'
+                ? historyMinusLast[h].content
+                : '(已省略历史多模态内容)'
+        });
+    }
+    var thisTurn = [];
+    if (images && images.length > 0) {
+        for (var i = 0; i < images.length; i++) {
+            thisTurn.push({
+                type: 'image_url',
+                image_url: { url: 'data:' + images[i].mediaType + ';base64,' + images[i].data }
+            });
+        }
+    }
+    var contextStr = '[当前 AE 项目状态]\n' + JSON.stringify(aeContext, null, 2);
+    thisTurn.push({ type: 'text', text: contextStr + '\n\n[用户请求]\n' + userMessage });
+    msgs.push({ role: 'user', content: thisTurn });
+
+    function iterate() {
+        if (iteration >= MAX_ITERATIONS) {
+            throw new Error('达到最大工具调用次数 (' + MAX_ITERATIONS + ')，已停止');
+        }
+        iteration++;
+        status('AI 正在思考' + (iteration > 1 ? ' (轮次 ' + iteration + ')' : '') + '...');
+
+        var body = {
+            model: model || 'gpt-5',
+            messages: msgs,
+            tools: openaiTools(),
+            tool_choice: 'auto'
+        };
+
+        return fetch(endpoint + '/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer ' + apiKey
+            },
+            body: JSON.stringify(body),
+            signal: currentAbortController.signal
+        })
+        .then(function(r) {
+            if (!r.ok) return r.json().then(function(e) {
+                throw new Error('API ' + r.status + ': ' + (e.error ? e.error.message : '未知'));
+            });
+            return r.json();
+        })
+        .then(function(data) {
+            var msg = data.choices[0].message;
+            // Echo assistant message back into context
+            msgs.push(msg);
+
+            if (msg.tool_calls && msg.tool_calls.length > 0) {
+                var chain = Promise.resolve();
+                msg.tool_calls.forEach(function(tc) {
+                    chain = chain.then(function() {
+                        var args = {};
+                        try { args = JSON.parse(tc.function.arguments); } catch(e) {}
+                        status('AI 调用工具：' + tc.function.name + ' ' + tc.function.arguments);
+                        return callTool(tc.function.name, args).then(function(result) {
+                            if (callbacks.onToolCall) {
+                                callbacks.onToolCall({ name: tc.function.name, args: args, result: result });
+                            }
+                            msgs.push({
+                                role: 'tool',
+                                tool_call_id: tc.id,
+                                content: JSON.stringify(result)
+                            });
+                        });
+                    });
+                });
+                return chain.then(iterate);
+            } else {
+                return msg.content || '';
             }
         });
     }

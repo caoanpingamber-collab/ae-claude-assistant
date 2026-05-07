@@ -135,6 +135,40 @@ body {
     font-size: 12px;
 }
 
+.provider-hint {
+    font-size: 11px;
+    color: #888;
+    margin-top: 4px;
+    min-height: 14px;
+}
+
+.provider-hint.detected {
+    color: #66bb6a;
+}
+
+.provider-hint.invalid {
+    color: #ff8a80;
+}
+
+details.advanced {
+    margin-top: 12px;
+}
+
+details.advanced summary {
+    font-size: 11px;
+    color: #888;
+    cursor: pointer;
+    padding: 4px 0;
+}
+
+details.advanced summary:hover {
+    color: #ccc;
+}
+
+details.advanced[open] summary {
+    margin-bottom: 6px;
+}
+
 #save-key-btn:hover {
     background: #3a7bc8;
 }

@@ -1,26 +1,14 @@
-# Claude AE Assistant
+# AE AI Assistant
 
-**在 Adobe After Effects 内用自然语言生成动画。**
+**在 Adobe After Effects 里用自然语言生成动画。无脑使用——粘贴你已有的 AI 客户端 API key 就能跑。**
 
-一个将 Claude AI 集成到 AE 的 CEP 扩展面板。聊天式描述需求，Claude 自动生成 ExtendScript 代码并一键执行到 AE 中。
+聊天式描述需求 → AI 主动调用工具调查 AE 状态 → 生成 ExtendScript → 执行到 AE。支持 **Claude（Anthropic）和 GPT/Codex（OpenAI）**，自动识别。
 
 ![Platform: macOS](https://img.shields.io/badge/platform-macOS-blue)
-![AE: 2025+](https://img.shields.io/badge/AE-2025%2B-orange)
+![AE: 2024+](https://img.shields.io/badge/AE-2024%2B-orange)
+![Provider: Claude / OpenAI](https://img.shields.io/badge/provider-Claude%20%7C%20OpenAI-green)
 
-## ✨ 功能
-
-- 🗣️ **自然语言生成动画** — 聊天式描述需求，自动生成 ExtendScript 并执行
-- @ **图层提及** — 输入 `@` 弹出当前合成的图层下拉，支持模糊筛选
-- 🖼️ **图片支持** — 粘贴 / 拖拽 / 上传图片作为参考（基于 Claude Vision）
-- 👁️ **代码预览** — 生成的代码先预览再执行，安全可控
-- ↩️ **一键撤销** — 所有 AI 操作包裹在 undo group 中，可一键回退
-- 🔧 **错误自动修复** — 执行失败时一键把错误反馈给 Claude 重新生成
-- 📥 **消息队列** — 生成中可继续发消息，自动排队作为补充
-- 🌐 **本地代理支持** — 可配置自定义 API 地址，支持兼容 Anthropic 格式的本地服务
-
-## 📦 安装（macOS）
-
-### 方式一：一键安装脚本（推荐）
+## 🚀 三步上手
 
 ```bash
 git clone https://github.com/caoanpingamber-collab/ae-claude-assistant.git
@@ -28,123 +16,149 @@ cd ae-claude-assistant
 ./install.sh
 ```
 
-脚本会自动：
-- 启用 CEP 调试模式
-- 复制到 `~/Library/Application Support/Adobe/CEP/extensions/com.claude.ae-assistant/`
+**重启 AE**（Cmd+Q 后重开），打开 Window > Extensions > Claude AI 助手，点齿轮图标，**粘贴你的 API key**，结束。
 
-### 方式二：手动安装
+## 🔑 API key 哪里来？
+
+### 🌟 推荐：用你已有的 Claude / ChatGPT 订阅（零 API 费用）
+
+如果你已经有 **Claude Max 订阅**或 **ChatGPT Plus/Pro 订阅**，本仓库自带的 `setup-auth2api.sh` 会自动帮你跑起 [`auth2api`](https://github.com/AmazingAng/auth2api)（一个把 OAuth 登录转成本地 API endpoint 的轻量代理）：
 
 ```bash
-# 1. 启用 CEP 调试模式
-defaults write com.adobe.CSXS.11 PlayerDebugMode 1
-defaults write com.adobe.CSXS.12 PlayerDebugMode 1
+# Claude Max 用户（默认）
+./setup-auth2api.sh
 
-# 2. 复制扩展
-mkdir -p ~/Library/Application\ Support/Adobe/CEP/extensions
-cp -R ae-claude-assistant ~/Library/Application\ Support/Adobe/CEP/extensions/com.claude.ae-assistant
+# ChatGPT Plus/Pro 用户
+./setup-auth2api.sh codex
+
+# Cursor 用户（实验性）
+./setup-auth2api.sh cursor
 ```
 
-## 🔑 配置 API 密钥
+脚本会：
+1. clone + build auth2api 到 `~/.auth2api/`
+2. 弹浏览器让你 OAuth 登录
+3. 打印插件需要填的 API key 和 endpoint
 
-**自带 API 密钥（BYOK）** — 你需要自己的 Anthropic API key 才能使用。
+之后在另一个 terminal 启动代理：
+```bash
+cd ~/.auth2api && node dist/index.js
+```
 
-1. 访问 https://console.anthropic.com/ 注册账号
-2. 进入 **API Keys** 页面，创建一个新的密钥（`sk-ant-...`）
-3. 完全退出 After Effects（Cmd+Q）后重新打开
-4. 菜单 **Window > Extensions > Claude AI 助手**
-5. 点击面板右上角的齿轮图标，填入密钥并保存
+在插件设置里：
+- **API 密钥**：粘贴脚本输出的 key（形如 `sk-...`）
+- **API 地址**（高级设置）：`http://127.0.0.1:8317`
 
-### 使用本地代理
+完成。这样使用插件**不会消耗 API 余额**，走的是你的订阅配额。
 
-如果你有本地的 Anthropic 兼容代理（如内部转发、Claude Code 中转等），在设置中把 **API 地址** 改为代理地址即可，例如 `http://127.0.0.1:8317`。
+### 直接用 API key
+
+或者直接从你的 AI 客户端拿现有 API key：
+
+| 你装了什么客户端 | API key 在哪 | 协议 |
+|---|---|---|
+| **Claude Code** | `~/.claude/settings.json` 或 `ANTHROPIC_API_KEY` 环境变量 | Anthropic |
+| **Anthropic Console** | https://console.anthropic.com/settings/keys | Anthropic |
+| **Codex CLI** | `~/.codex/config.toml` 或 `OPENAI_API_KEY` 环境变量 | OpenAI |
+| **OpenAI Console** | https://platform.openai.com/api-keys | OpenAI |
+| **Continue / Cursor** | 客户端设置里复制 | OpenAI 或 Anthropic |
+| **本地代理** (LM Studio / Ollama / 自建) | 高级设置里填 endpoint | OpenAI 兼容 |
+
+插件**自动识别 key 格式**：
+- `sk-ant-...` → 走 Anthropic 协议（默认 Claude Opus 4.7 + extended thinking）
+- `sk-...` 或 `sk-proj-...` → 走 OpenAI 协议（默认 GPT-5）
+
+不用选 provider，不用配 endpoint，不用挑 model——粘贴就行。
+
+## ✨ 功能
+
+- 🤖 **AI 主动调查 AE** — 用 tool use，写代码前先 query_layer / query_effect 调查图层结构、关键帧、效果属性，避免盲写
+- 🔁 **自动错误重试** — 执行失败后自动反馈错误回 AI，最多重试 2 次，几乎无需手动干预
+- 🧠 **Extended thinking** — Opus 4.x / Sonnet 4.x 自动启用 4096 tokens 思考预算
+- @ **图层提及** — 输入 `@` 弹出当前合成图层列表，支持模糊筛选
+- 🖼️ **图片识别** — 粘贴 / 拖拽 / 上传图片作为参考（vision 多模态）
+- 🎬 **视频识别** — 拖入视频自动抽帧 + 时序分析，附在请求里
+- 👁️ **代码预览** — 生成的代码先预览再执行
+- ↩️ **一键撤销** — 所有 AI 操作包裹在 undo group 中
+- 📥 **消息队列** — 生成中可继续发消息排队作为补充
+- 💾 **聊天记录持久化** — 关闭面板再打开历史还在
+- ⌨️ **CEP 标准缺失补全** — Cmd+C 复制、文本选中等
 
 ## 🎬 使用方法
 
-### 基础对话
-
-直接在输入框描述需求：
+### 基础
 
 ```
-给选中图层添加从左侧滑入的弹性动画
+@图层名 加一个从下方淡入弹起的入场，0.6 秒，回弹强烈
 ```
 
 ```
-创建一个文字飞入效果，逐字出现，带模糊
+给当前合成所有图层做一个错落出现的级联效果，每个差 0.1 秒
 ```
 
-### @ 提及图层
-
-输入 `@` 弹出图层列表，选中后再描述：
+### 复杂任务（AI 会自己调查）
 
 ```
-@Result/Sticker_Vector2 加上火焰持续燃烧的效果
+@火焰 加一个底部固定的湍流燃烧效果，参考火苗的物理感
 ```
+→ AI 会先 `query_layer("火焰")` 看图层结构，再 `query_effect` 拿到湍流置换的可设置属性，再写代码。
 
-### 上传图片参考
+### 上传图片/视频参考
 
 - **粘贴**：截图后直接 Ctrl+V / Cmd+V
-- **拖拽**：把图片文件拖到面板任意位置
-- **点击 📎 按钮**选择文件
+- **拖拽**：图片或视频文件拖到面板任意位置
+- **点📎**：选文件
 
-然后描述："参考这张图片的动画效果"。
+视频会自动抽 6 帧 + Haiku 分析时序，缩略图带 ▶ 标记。
 
-### 错误修复
+### 错误处理
 
-如果代码执行失败，点击红色错误消息下方的 **🔧 让 Claude 修复**，会自动把错误信息和代码发回给 Claude 重新生成。
-
-### 撤销
-
-每次执行都包裹在一个 undo group 里。可以：
-- **AE 里 Cmd+Z** 撤销
-- 或点击面板顶部的 **↩** 按钮
+代码执行失败时**会自动重试**——不需要你点修复按钮：
+1. 错误回喂给 AI
+2. AI 用工具调查实际状态，定位错误
+3. 重新生成代码再执行
+4. 最多 2 次自动重试，再失败才弹手动修复按钮
 
 ## 🏗️ 项目结构
 
 ```
 .
-├── CSXS/manifest.xml         # CEP 扩展清单
-├── icons/                    # 面板图标
-├── client/                   # 前端面板
-│   ├── index.html
+├── CSXS/manifest.xml
+├── client/
+│   ├── index.html                  # 面板 UI
 │   ├── css/style.css
 │   └── js/
-│       ├── CSInterface.js    # Adobe CEP 通信桥
-│       ├── main.js           # 主逻辑、UI 事件、@ mention
-│       ├── claude-api.js     # Claude API 集成 + system prompt
-│       ├── ae-bridge.js      # CSInterface 封装
-│       └── settings.js       # localStorage 配置
-├── host/                     # ExtendScript 主机
-│   ├── ae-context.jsx        # 获取 AE 上下文 + 执行代码
-│   └── json2.jsx             # JSON polyfill (兼容老版 AE)
-├── install.sh                # 一键安装
-├── uninstall.sh              # 卸载
+│       ├── CSInterface.js          # Adobe CEP 通信桥
+│       ├── main.js                 # 主逻辑、UI 事件、@ mention
+│       ├── claude-api.js           # Anthropic + OpenAI 双协议 + tool 循环
+│       ├── ae-bridge.js            # CSInterface 封装 + tool 调用
+│       └── settings.js             # 自动识别 + localStorage
+├── host/
+│   ├── ae-context.jsx              # ExtendScript: 工具实现 + 代码执行
+│   └── json2.jsx                   # JSON polyfill
+├── install.sh / uninstall.sh
 └── README.md
-```
-
-## ⚠️ 安全说明
-
-- **API 密钥**：保存在 CEP 的 localStorage 中（明文存储于 `~/Library/Application Support/Adobe/CEP/`）
-- **代码执行**：Claude 生成的代码通过 `eval()` 在 ExtendScript 中执行；所有代码会在面板里**先预览再执行**，由你点击"执行"才会运行
-- **个人工具定位**：本扩展未做沙箱隔离，请只在受信任环境使用
-
-## 🐛 调试
-
-如果面板加载有问题：
-
-```bash
-# 查看 CEP 日志
-ls ~/Library/Logs/CSXS/ | grep claude
-
-# Chrome DevTools 连接面板
-# 1. 启动 AE 并打开扩展
-# 2. 浏览器访问 http://localhost:8088
 ```
 
 ## 🛠️ 兼容性
 
 - After Effects 2024+ (Host Version 16.0+)
 - macOS（Windows 路径需调整 install.sh）
-- Anthropic API（Claude Sonnet 4.6 / Opus 4.7 / Haiku 4.5）
+- API: Anthropic Messages / OpenAI Chat Completions
+- 模型: Claude Sonnet 4.6 / Opus 4.7、GPT-5、o1/o3、本地兼容服务等
+
+## ⚠️ 安全说明
+
+- **API 密钥**：保存在 CEP localStorage（明文于 `~/Library/Application Support/Adobe/CEP/`）
+- **代码执行**：AI 生成的代码会在面板**预览**后由你点"执行"才运行，包裹在 undo group 中
+- **个人工具**：未做沙箱隔离，请只在受信任环境使用
+
+## 🐛 调试
+
+```bash
+ls ~/Library/Logs/CSXS/ | grep claude    # CEP 日志
+# 浏览器访问 http://localhost:8088 → Chrome DevTools 连接面板
+```
 
 ## 📄 License
 

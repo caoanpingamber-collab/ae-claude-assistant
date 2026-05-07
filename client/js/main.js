@@ -13,7 +13,8 @@
     var settingsPanel = document.getElementById('settings-panel');
     var apiEndpointInput = document.getElementById('api-endpoint-input');
     var apiKeyInput = document.getElementById('api-key-input');
-    var modelSelect = document.getElementById('model-select');
+    var modelInput = document.getElementById('model-input');
+    var providerHint = document.getElementById('provider-hint');
     var saveKeyBtn = document.getElementById('save-key-btn');
     var clearBtn = document.getElementById('clear-btn');
     var undoBtn = document.getElementById('undo-btn');
@@ -29,9 +30,32 @@
     var clearImagesBtn = document.getElementById('clear-images-btn');
 
     // Init settings
-    apiEndpointInput.value = getApiEndpoint();
+    apiEndpointInput.value = (localStorage.getItem('claude_api_endpoint') || '');
     apiKeyInput.value = getApiKey();
-    modelSelect.value = getModel();
+    modelInput.value = (localStorage.getItem('claude_model') || '');
+    updateProviderHint();
+
+    function updateProviderHint() {
+        var key = apiKeyInput.value.trim();
+        if (!key) {
+            providerHint.textContent = '';
+            providerHint.className = 'provider-hint';
+            return;
+        }
+        var p = detectProviderFromKey(key);
+        if (p === 'anthropic') {
+            providerHint.textContent = '✓ 检测到 Anthropic Claude（默认 Opus 4.7 + extended thinking）';
+            providerHint.className = 'provider-hint detected';
+        } else if (p === 'openai') {
+            providerHint.textContent = '✓ 检测到 OpenAI 兼容（默认 gpt-5；可在高级设置改成 codex / o1 / 本地代理）';
+            providerHint.className = 'provider-hint detected';
+        } else {
+            providerHint.textContent = '⚠ 未识别的密钥格式（可在高级设置手动指定 API 地址）';
+            providerHint.className = 'provider-hint invalid';
+        }
+    }
+
+    apiKeyInput.addEventListener('input', updateProviderHint);
 
     // Chat log: in-memory mirror of persisted chat history
     var chatLog = getChatLog();
@@ -297,11 +321,38 @@
 
     // Save settings
     saveKeyBtn.addEventListener('click', function() {
-        setApiEndpoint(apiEndpointInput.value.trim());
-        setApiKey(apiKeyInput.value.trim());
-        setModel(modelSelect.value);
+        var key = apiKeyInput.value.trim();
+        if (!key) {
+            appendMessage('error', '请填入 API 密钥');
+            return;
+        }
+
+        // Auto-detect provider from key
+        var detected = detectProviderFromKey(key);
+        if (detected) {
+            setProvider(detected);
+        }
+
+        // Endpoint: user-provided takes priority, else default by provider
+        var endpoint = apiEndpointInput.value.trim();
+        if (endpoint) {
+            setApiEndpoint(endpoint);
+        } else if (detected) {
+            localStorage.setItem('claude_api_endpoint', getDefaultEndpointForProvider(detected));
+        }
+
+        // Model: user-provided takes priority, else default by provider
+        var modelStr = modelInput.value.trim();
+        if (modelStr) {
+            setModel(modelStr);
+        } else if (detected) {
+            localStorage.setItem('claude_model', getDefaultModelForProvider(detected));
+        }
+
+        setApiKey(key);
         settingsPanel.classList.add('hidden');
-        appendMessage('system', '设置已保存 (' + getApiEndpoint() + ')');
+        var providerLabel = getProvider() === 'openai' ? 'OpenAI 兼容' : 'Anthropic Claude';
+        appendMessage('system', '设置已保存 · ' + providerLabel + ' · 模型 ' + getModel());
     });
 
     // Clear conversation
