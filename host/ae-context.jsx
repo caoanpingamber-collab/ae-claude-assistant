@@ -172,6 +172,152 @@ function getSelectedLayerNames() {
     }
 }
 
+// === Tool: deep introspection of a single layer ===
+function findLayerByName(comp, name) {
+    for (var i = 1; i <= comp.numLayers; i++) {
+        if (comp.layer(i).name === name) return comp.layer(i);
+    }
+    return null;
+}
+
+function dumpProperty(prop, depth, maxDepth) {
+    if (depth > maxDepth) return { _truncated: true };
+    var info = {};
+    try { info.name = prop.name; } catch(e) {}
+    try { info.matchName = prop.matchName; } catch(e) {}
+    try { info.propertyType = String(prop.propertyType); } catch(e) {}
+    try {
+        if (prop.numKeys && prop.numKeys > 0) {
+            info.numKeys = prop.numKeys;
+            info.keys = [];
+            for (var k = 1; k <= Math.min(prop.numKeys, 5); k++) {
+                info.keys.push({ time: prop.keyTime(k), value: prop.keyValue(k) });
+            }
+        }
+    } catch(e) {}
+    try { if (prop.expression) info.expression = prop.expression; } catch(e) {}
+    try { if (prop.value !== undefined) info.value = prop.value; } catch(e) {}
+
+    try {
+        if (prop.numProperties && prop.numProperties > 0) {
+            info.children = [];
+            for (var j = 1; j <= prop.numProperties; j++) {
+                info.children.push(dumpProperty(prop.property(j), depth + 1, maxDepth));
+            }
+        }
+    } catch(e) {}
+    return info;
+}
+
+function tool_query_layer(args) {
+    try {
+        var layerName = args.layer_name;
+        var comp = app.project.activeItem;
+        if (!comp || !(comp instanceof CompItem)) {
+            return { error: "no active comp" };
+        }
+        var layer = findLayerByName(comp, layerName);
+        if (!layer) return { error: "layer not found: " + layerName };
+
+        var info = {
+            name: layer.name,
+            index: layer.index,
+            type: getLayerType(layer),
+            inPoint: layer.inPoint,
+            outPoint: layer.outPoint,
+            startTime: layer.startTime,
+            enabled: layer.enabled,
+            transform: dumpProperty(layer.property("Transform"), 0, 3),
+            effects: []
+        };
+        try {
+            var fxRoot = layer.property("Effects");
+            if (fxRoot) {
+                for (var i = 1; i <= fxRoot.numProperties; i++) {
+                    info.effects.push({
+                        index: i,
+                        name: fxRoot.property(i).name,
+                        matchName: fxRoot.property(i).matchName
+                    });
+                }
+            }
+        } catch(e) {}
+
+        if (layer instanceof TextLayer) {
+            try {
+                var td = layer.property("Source Text").value;
+                info.text = { content: td.text, font: td.font, fontSize: td.fontSize };
+            } catch(e) {}
+        }
+
+        if (layer instanceof ShapeLayer) {
+            try {
+                info.contents = dumpProperty(layer.property("Contents"), 0, 4);
+            } catch(e) {}
+        }
+
+        return info;
+    } catch(e) {
+        return { error: e.toString() };
+    }
+}
+
+function tool_query_effect(args) {
+    try {
+        var layerName = args.layer_name;
+        var idx = args.effect_index;
+        var comp = app.project.activeItem;
+        if (!comp || !(comp instanceof CompItem)) return { error: "no active comp" };
+        var layer = findLayerByName(comp, layerName);
+        if (!layer) return { error: "layer not found: " + layerName };
+        var fxRoot = layer.property("Effects");
+        if (!fxRoot || idx < 1 || idx > fxRoot.numProperties) {
+            return { error: "effect index out of range" };
+        }
+        var fx = fxRoot.property(idx);
+        return {
+            name: fx.name,
+            matchName: fx.matchName,
+            properties: dumpProperty(fx, 0, 3)
+        };
+    } catch(e) {
+        return { error: e.toString() };
+    }
+}
+
+function tool_list_all_layers(args) {
+    try {
+        var comp = app.project.activeItem;
+        if (!comp || !(comp instanceof CompItem)) return { error: "no active comp" };
+        var list = [];
+        for (var i = 1; i <= comp.numLayers; i++) {
+            var L = comp.layer(i);
+            var entry = { index: i, name: L.name, type: getLayerType(L) };
+            try {
+                var fxRoot = L.property("Effects");
+                if (fxRoot && fxRoot.numProperties > 0) {
+                    entry.effectCount = fxRoot.numProperties;
+                }
+            } catch(e) {}
+            list.push(entry);
+        }
+        return { comp: comp.name, layers: list };
+    } catch(e) {
+        return { error: e.toString() };
+    }
+}
+
+function dispatchTool(toolName, argsJson) {
+    var args = {};
+    try { args = JSON.parse(argsJson); } catch(e) {}
+    var result;
+    if (toolName === 'query_layer') result = tool_query_layer(args);
+    else if (toolName === 'query_effect') result = tool_query_effect(args);
+    else if (toolName === 'list_all_layers') result = tool_list_all_layers(args);
+    else result = { error: "unknown tool: " + toolName };
+    return JSON.stringify(result);
+}
+
 function undoLastAction() {
     // Try multiple menu names for different language versions
     var menuNames = ["Undo", "撤消", "撤销", "Annuler", "Rueckgaengig", "Deshacer", "Annulla"];

@@ -1,97 +1,129 @@
-// claude-api.js - Claude API integration for AE Assistant
+// claude-api.js - Claude API integration with tool use, extended thinking, auto-retry
 
-var SYSTEM_PROMPT = '你是一个 Adobe After Effects ExtendScript 专家助手，在 AE 扩展面板中运行。\n\n' +
-'核心规则：\n' +
-'1. 只输出可直接在 AE 中执行的 ExtendScript 代码\n' +
-'2. 代码必须是 ECMAScript 3 语法（ExtendScript 基于 ES3）\n' +
-'3. 不要使用 let/const/箭头函数/模板字符串/解构等 ES6+ 语法\n' +
-'4. 使用 var 声明变量\n' +
-'5. 使用 function 关键字定义函数\n' +
-'6. 数组方法仅限 push/pop/shift/unshift/splice/slice/concat/join\n' +
-'7. 用 for 循环代替 forEach/map/filter\n' +
-'8. 字符串拼接用 + 运算符\n\n' +
-'AE ExtendScript 关键 API：\n' +
-'- app.project.activeItem 获取当前合成（CompItem）\n' +
-'- comp.layers.addText("文字") 添加文字图层\n' +
-'- comp.layers.addShape() 添加形状图层\n' +
-'- comp.layers.addSolid([r,g,b], "name", w, h, ratio) 添加纯色图层\n' +
-'- comp.layers.addNull() 添加空对象\n' +
-'- layer.property("Position").setValueAtTime(time, [x,y]) 设置关键帧\n' +
-'- layer.property("Scale").setValueAtTime(time, [x,y])\n' +
-'- layer.property("Opacity").setValueAtTime(time, value)\n' +
-'- layer.property("Rotation").setValueAtTime(time, value)\n' +
-'- layer.property("Anchor Point").setValueAtTime(time, [x,y])\n\n' +
-'关键帧缓动：\n' +
-'- var ease = new KeyframeEase(0, 75);\n' +
-'- layer.property("Position").setTemporalEaseAtKey(keyIndex, [ease, ease]);\n' +
-'- KeyframeInterpolationType.LINEAR / BEZIER / HOLD\n\n' +
-'形状图层操作：\n' +
-'- var shapeGroup = layer.property("Contents").addProperty("ADBE Vector Group");\n' +
-'- shapeGroup.property("Contents").addProperty("ADBE Vector Shape - Rect");\n' +
-'- shapeGroup.property("Contents").addProperty("ADBE Vector Shape - Ellipse");\n' +
-'- shapeGroup.property("Contents").addProperty("ADBE Vector Graphic - Fill");\n' +
-'- shapeGroup.property("Contents").addProperty("ADBE Vector Graphic - Stroke");\n\n' +
-'常用效果 matchName（必须用 matchName 不要用 displayName）：\n' +
-'- ADBE Gaussian Blur 2 高斯模糊\n' +
-'- ADBE Drop Shadow 投影\n' +
-'- ADBE Glo2 发光\n' +
-'- ADBE Wave Warp 波形变形（火焰、旗帜常用，有 Pinning 属性可固定一边）\n' +
-'- ADBE Turbulent Displace 湍流置换\n' +
-'- ADBE Fractal Noise 分形杂色\n' +
-'- ADBE Set Matte3 设置遮罩\n' +
-'- ADBE Linear Wipe 线性擦除\n\n' +
-'设置效果属性：\n' +
-'- var fx = layer.property("Effects").addProperty("ADBE Wave Warp");\n' +
-'- fx.property("Wave Height").setValue(20);\n' +
-'- fx.property("Wave Width").setValue(50);\n' +
-'- fx.property("Pinning").setValue(2); // 1=None,2=All,3=TopEdge,4=RightEdge,5=BottomEdge,6=LeftEdge,7=Top&Bottom,8=Left&Right\n\n' +
-'表达式：\n' +
-'- layer.property("Position").expression = "wiggle(5, 20)";\n\n' +
-'⚠️ 防御性编程（极其重要，违反会导致 null 错误）：\n' +
-'1. addProperty() 在 matchName 错误时返回 null，必须检查：\n' +
-'   var fx = layer.property("Effects").addProperty("ADBE Wave Warp");\n' +
-'   if (!fx) { alert("效果添加失败"); return; }\n' +
-'2. layer.property() 在属性名错误时也可能返回 null，访问前检查\n' +
-'3. comp.selectedLayers 可能为空数组，使用前检查 length\n' +
-'4. 优先使用属性的英文名（如 "Position"），不要用本地化名称\n' +
-'5. 添加效果属性后，访问子属性也要检查：\n' +
-'   var prop = fx.property("Wave Height");\n' +
-'   if (prop) prop.setValue(20);\n' +
-'6. 用 try-catch 包裹整段操作每个图层的逻辑，避免一个图层失败导致整个脚本崩溃\n' +
-'7. 操作前确保有图层：if (comp.selectedLayers.length === 0) { alert("请先选中图层"); return; }\n\n' +
-'输出格式：\n' +
-'- 将代码放在 ```javascript 代码块中\n' +
-'- 在代码前用中文简要说明将要执行的操作\n' +
-'- 代码应该是自包含的，不依赖外部变量\n' +
-'- 代码开头获取 comp: var comp = app.project.activeItem;\n' +
-'- 检查 comp 是否存在: if (!(comp instanceof CompItem)) { alert("请先选择一个合成"); return; }\n' +
-'- 用 try-catch 包裹关键操作，错误时给出明确的中文提示\n' +
-'- 不需要包含 app.beginUndoGroup / app.endUndoGroup，系统会自动包裹\n\n' +
-'当前 AE 项目上下文信息会在每次请求中提供，请根据上下文生成代码。';
+var SYSTEM_PROMPT = [
+    '你是一位资深的 Adobe After Effects 动效工程师，在 AE 扩展面板中工作。你的任务是把用户的自然语言需求精确转换为可直接执行的 ExtendScript 代码。',
+    '',
+    '【工作流程 - 必须遵守】',
+    '在写代码前，先用工具了解 AE 当前真实状态。简单任务可以直接写；复杂任务（特定图层、复杂效果、多图层联动）必须先调用工具：',
+    '1. 不确定图层结构 → 调用 query_layer 看完整属性树（位置/缩放/关键帧/效果列表/Contents 嵌套）',
+    '2. 要修改某个效果 → 调用 query_effect 拿到该效果的所有子属性名（确保 setValue 用对名字）',
+    '3. 要操作所有图层 → 调用 list_all_layers 获取列表',
+    '禁止盲写。看到错误后，先用工具调查，再改代码。',
+    '',
+    '【ES3 语法约束】',
+    '- 用 var 声明，function 定义函数；禁用 let/const/箭头函数/模板字符串/解构/Array.forEach/map/filter',
+    '- 数组方法只有：push/pop/shift/unshift/splice/slice/concat/join/length',
+    '- 字符串拼接用 +，没有模板字符串',
+    '',
+    '【关键 API】',
+    '- comp = app.project.activeItem (检查 instanceof CompItem)',
+    '- comp.layers.addText(str) / addShape() / addSolid([r,g,b], name, w, h, ratio) / addNull()',
+    '- layer.property("Position").setValueAtTime(t, [x,y]) — 关键帧',
+    '- layer.property("Effects").addProperty(matchName) — 必须用 matchName 不是 displayName',
+    '- new KeyframeEase(speed, influence) + setTemporalEaseAtKey(idx, [in, out])',
+    '- 设值: prop.setValue(v); 设关键帧: prop.setValueAtTime(t, v)',
+    '',
+    '【常用 matchName 速查】',
+    '形状层组件:',
+    '- ADBE Vector Group / ADBE Vector Shape - Rect / ADBE Vector Shape - Ellipse / ADBE Vector Shape - Star / ADBE Vector Shape - Group',
+    '- ADBE Vector Graphic - Fill / ADBE Vector Graphic - Stroke / ADBE Vector Filter - Trim',
+    '效果:',
+    '- ADBE Gaussian Blur 2 / ADBE Drop Shadow / ADBE Glo2 / ADBE Camera Lens Blur',
+    '- ADBE Wave Warp (有 Pinning 1=None,2=All,3=Top,4=Right,5=Bottom,6=Left,7=Top&Bottom,8=Left&Right)',
+    '- ADBE Turbulent Displace / ADBE Fractal Noise / ADBE Set Matte3 / ADBE Linear Wipe / ADBE Radial Wipe',
+    '- ADBE Hue Saturation / ADBE Curves2 / ADBE Tint / ADBE Levels2',
+    '- ADBE CC RepeTile / ADBE Echo / ADBE Posterize / ADBE Slider Control / ADBE Point Control / ADBE Color Control',
+    '',
+    '【铁律：防御性编程】',
+    '违反这些会导致 "TypeError: null 不是对象"：',
+    '1. addProperty() / property() 可能返回 null，赋值前必须 if (!x) 检查',
+    '2. comp.selectedLayers 可能为空，length 检查',
+    '3. 用属性英文名（"Position" "Scale" "Opacity" "Rotation" "Anchor Point"），不要用本地化',
+    '4. 操作每个图层用 try-catch 包裹，单图层失败不影响整体',
+    '5. 读 textDocument 后修改属性（fontSize, text, font），必须重新 setValue 整个 textDocument',
+    '6. 形状层是 ADBE Vector Group → Contents → ADBE Vector Shape - X，三层嵌套',
+    '',
+    '【输出格式】',
+    '- 简短中文说明（2-3 行）+ 代码块（```javascript ... ```）',
+    '- 代码自包含、可直接执行',
+    '- 头两行: var comp = app.project.activeItem; if (!(comp instanceof CompItem)) { alert("请先打开合成"); }',
+    '- 主逻辑用 try-catch 包裹，失败给出具体中文错误（不要用 "出错了" 这种泛泛提示）',
+    '- 系统会自动 beginUndoGroup/endUndoGroup，你不需要写',
+    '',
+    '【收到执行错误时】',
+    '收到 "上一段代码执行失败：..." 类的提示时，先用 query_layer / query_effect 调查实际状态（属性是否存在、effect 是否真添加成功），再改代码。不要重复犯同样的错误。'
+].join('\n');
+
+// Tools that Claude can call to introspect AE state
+var TOOLS = [
+    {
+        name: 'query_layer',
+        description: '获取指定图层的完整属性树，包括 Transform 所有子属性、关键帧（最多5个）、表达式、效果列表、形状层 Contents 嵌套结构、文字层文本属性。在写涉及该图层的代码前调用此工具，避免假设属性结构。',
+        input_schema: {
+            type: 'object',
+            properties: {
+                layer_name: { type: 'string', description: '图层名称（精确匹配）' }
+            },
+            required: ['layer_name']
+        }
+    },
+    {
+        name: 'query_effect',
+        description: '获取图层上某个效果的完整属性树（包含所有可设置的子属性名和当前值）。在调用 fx.property("xxx").setValue 前先用此工具确认 "xxx" 是有效属性名。',
+        input_schema: {
+            type: 'object',
+            properties: {
+                layer_name: { type: 'string' },
+                effect_index: { type: 'number', description: '效果索引（从 1 开始）' }
+            },
+            required: ['layer_name', 'effect_index']
+        }
+    },
+    {
+        name: 'list_all_layers',
+        description: '列出当前合成所有图层（名称、类型、效果数量）。当上下文中没有该图层信息或想发现潜在目标图层时使用。',
+        input_schema: {
+            type: 'object',
+            properties: {}
+        }
+    }
+];
 
 var conversationMessages = [];
 var currentAbortController = null;
+
+function restoreConversationMessages(saved) {
+    if (saved && saved instanceof Array) conversationMessages = saved;
+}
+
+function persistConversationMessages() {
+    if (typeof setConversationMessages === 'function') {
+        setConversationMessages(conversationMessages);
+    }
+}
 
 function abortCurrentRequest() {
     if (currentAbortController) {
         try { currentAbortController.abort(); } catch(e) {}
         currentAbortController = null;
     }
-    // Remove the last user message that was added but not completed
     if (conversationMessages.length > 0 &&
         conversationMessages[conversationMessages.length - 1].role === 'user') {
         conversationMessages.pop();
     }
 }
 
-function callClaudeAPI(userMessage, aeContext, apiKey, model, images) {
-    // Build content blocks for THIS turn (with images + context). These get persisted
-    // to history but stripped to text-only on subsequent sends to avoid token bloat.
-    var contentBlocks = [];
+function resetConversation() {
+    conversationMessages = [];
+    persistConversationMessages();
+}
 
+// One-shot API call (no history, no tools, no streaming) — for video summarization
+function callClaudeOneShot(textPrompt, images, apiKey, model) {
+    var blocks = [];
     if (images && images.length > 0) {
         for (var i = 0; i < images.length; i++) {
-            contentBlocks.push({
+            blocks.push({
                 type: 'image',
                 source: {
                     type: 'base64',
@@ -101,30 +133,9 @@ function callClaudeAPI(userMessage, aeContext, apiKey, model, images) {
             });
         }
     }
-
-    contentBlocks.push({ type: 'text', text: userMessage });
-
-    // Persistent history: just the user's text + assistant replies. No images, no context.
-    conversationMessages.push({ role: 'user', content: userMessage });
-
-    // Keep last 10 messages to avoid token limit
-    if (conversationMessages.length > 10) {
-        conversationMessages = conversationMessages.slice(-10);
-    }
-
-    // Build the request: history + the current turn (with images + fresh context).
-    // The current-turn message replaces the just-pushed text-only one.
-    var contextStr = '[当前 AE 项目状态]\n' + JSON.stringify(aeContext, null, 2);
-    var requestMessages = conversationMessages.slice(0, -1);
-    var currentTurn = contentBlocks.slice();
-    currentTurn[currentTurn.length - 1] = {
-        type: 'text',
-        text: contextStr + '\n\n[用户请求]\n' + userMessage
-    };
-    requestMessages.push({ role: 'user', content: currentTurn });
+    blocks.push({ type: 'text', text: textPrompt });
 
     var endpoint = getApiEndpoint();
-    currentAbortController = new AbortController();
     return fetch(endpoint + '/v1/messages', {
         method: 'POST',
         headers: {
@@ -134,41 +145,160 @@ function callClaudeAPI(userMessage, aeContext, apiKey, model, images) {
             'anthropic-dangerous-direct-browser-access': 'true'
         },
         body: JSON.stringify({
-            model: model || 'claude-opus-4-7',
-            max_tokens: 4096,
-            system: SYSTEM_PROMPT,
-            messages: requestMessages
-        }),
-        signal: currentAbortController.signal
+            model: model || 'claude-haiku-4-5-20251001',
+            max_tokens: 2048,
+            messages: [{ role: 'user', content: blocks }]
+        })
     })
-    .then(function(response) {
-        if (!response.ok) {
-            return response.json().then(function(err) {
-                throw new Error('API 错误 (' + response.status + '): ' + (err.error ? err.error.message : '未知错误'));
+    .then(function(r) {
+        if (!r.ok) return r.json().then(function(e) {
+            throw new Error('API ' + r.status + ': ' + (e.error ? e.error.message : '?'));
+        });
+        return r.json();
+    })
+    .then(function(d) { return d.content[0].text; });
+}
+
+// Main API call with tool use, extended thinking, and auto-retry on tool errors
+// callbacks = { onStatus(text), onToolCall({name, args, result}), onComplete(text) }
+function callClaudeAPI(userMessage, aeContext, apiKey, model, images, callbacks) {
+    callbacks = callbacks || {};
+    var status = callbacks.onStatus || function() {};
+
+    var safeUserMessage = (userMessage && userMessage.trim()) ? userMessage : '(请参考附图)';
+
+    var initialContent = [];
+    if (images && images.length > 0) {
+        for (var i = 0; i < images.length; i++) {
+            initialContent.push({
+                type: 'image',
+                source: { type: 'base64', media_type: images[i].mediaType, data: images[i].data }
             });
         }
-        return response.json();
-    })
-    .then(function(data) {
+    }
+    var contextStr = '[当前 AE 项目状态]\n' + JSON.stringify(aeContext, null, 2);
+    initialContent.push({ type: 'text', text: contextStr + '\n\n[用户请求]\n' + safeUserMessage });
+
+    // Persistent history: text-only summary
+    conversationMessages.push({ role: 'user', content: safeUserMessage });
+    if (conversationMessages.length > 10) conversationMessages = conversationMessages.slice(-10);
+    conversationMessages = conversationMessages.filter(function(m) {
+        if (typeof m.content === 'string') return m.content.trim().length > 0;
+        if (m.content instanceof Array) return m.content.length > 0;
+        return false;
+    });
+
+    // requestMessages: full message array sent to API (mutated through tool loop)
+    var requestMessages = conversationMessages.slice(0, -1);
+    requestMessages.push({ role: 'user', content: initialContent });
+
+    currentAbortController = new AbortController();
+
+    return runToolLoop(requestMessages, apiKey, model, status, callbacks).then(function(finalText) {
         currentAbortController = null;
-        var text = data.content[0].text;
-        conversationMessages.push({ role: 'assistant', content: text });
-        return text;
+        conversationMessages.push({ role: 'assistant', content: finalText });
+        persistConversationMessages();
+        if (callbacks.onComplete) callbacks.onComplete(finalText);
+        return finalText;
     });
 }
 
-function extractCode(responseText) {
-    var patterns = [
-        /```(?:javascript|jsx|extendscript)\s*\n([\s\S]*?)```/,
-        /```\s*\n([\s\S]*?)```/
-    ];
-    for (var i = 0; i < patterns.length; i++) {
-        var match = responseText.match(patterns[i]);
-        if (match) return match[1].trim();
+function runToolLoop(requestMessages, apiKey, model, status, callbacks) {
+    var endpoint = getApiEndpoint();
+    var iteration = 0;
+    var MAX_ITERATIONS = 8;
+
+    function iterate() {
+        if (iteration >= MAX_ITERATIONS) {
+            throw new Error('达到最大工具调用次数 (' + MAX_ITERATIONS + ')，已停止');
+        }
+        iteration++;
+        status('Claude 正在思考' + (iteration > 1 ? ' (轮次 ' + iteration + ')' : '') + '...');
+
+        var body = {
+            model: model || 'claude-opus-4-7',
+            max_tokens: 8192,
+            system: SYSTEM_PROMPT,
+            messages: requestMessages,
+            tools: TOOLS
+        };
+        // Extended thinking for Opus / Sonnet 4.x
+        if (/opus-4|sonnet-4/.test(body.model)) {
+            body.thinking = { type: 'enabled', budget_tokens: 4096 };
+        }
+
+        return fetch(endpoint + '/v1/messages', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'x-api-key': apiKey,
+                'anthropic-version': '2023-06-01',
+                'anthropic-dangerous-direct-browser-access': 'true'
+            },
+            body: JSON.stringify(body),
+            signal: currentAbortController.signal
+        })
+        .then(function(r) {
+            if (!r.ok) return r.json().then(function(e) {
+                throw new Error('API ' + r.status + ': ' + (e.error ? e.error.message : '未知'));
+            });
+            return r.json();
+        })
+        .then(function(data) {
+            // Save assistant message (with all blocks: thinking + tool_use + text)
+            requestMessages.push({ role: 'assistant', content: data.content });
+
+            if (data.stop_reason === 'tool_use') {
+                // Find all tool_use blocks; execute them; build user message with tool_results
+                var toolUseBlocks = data.content.filter(function(b) { return b.type === 'tool_use'; });
+                var toolResultsContent = [];
+                var promiseChain = Promise.resolve();
+
+                toolUseBlocks.forEach(function(tu) {
+                    promiseChain = promiseChain.then(function() {
+                        status('Claude 调用工具：' + tu.name + ' (' + JSON.stringify(tu.input) + ')');
+                        return callTool(tu.name, tu.input).then(function(result) {
+                            if (callbacks.onToolCall) {
+                                callbacks.onToolCall({ name: tu.name, args: tu.input, result: result });
+                            }
+                            toolResultsContent.push({
+                                type: 'tool_result',
+                                tool_use_id: tu.id,
+                                content: JSON.stringify(result)
+                            });
+                        });
+                    });
+                });
+
+                return promiseChain.then(function() {
+                    requestMessages.push({ role: 'user', content: toolResultsContent });
+                    return iterate();
+                });
+            } else {
+                // end_turn or other: extract text from content blocks
+                var text = '';
+                for (var i = 0; i < data.content.length; i++) {
+                    if (data.content[i].type === 'text') {
+                        text += data.content[i].text;
+                    }
+                }
+                return text;
+            }
+        });
     }
-    return null;
+
+    return iterate();
 }
 
-function resetConversation() {
-    conversationMessages = [];
+function extractCode(responseText) {
+    var matches = [];
+    var re = /```(?:javascript|jsx|extendscript)?\s*\n?([\s\S]*?)```/g;
+    var m;
+    while ((m = re.exec(responseText)) !== null) {
+        matches.push(m[1].trim());
+    }
+    if (matches.length === 0) return null;
+    if (matches.length === 1) return matches[0];
+    // Multiple blocks: concatenate (helper + main, etc.)
+    return matches.join('\n\n');
 }

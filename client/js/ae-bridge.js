@@ -58,6 +58,24 @@ function getSelectedLayers() {
     });
 }
 
+// Call an introspection tool defined in ae-context.jsx (query_layer / query_effect / list_all_layers)
+function callTool(toolName, argsObj) {
+    return loadJSX().then(function() {
+        return new Promise(function(resolve) {
+            var argsJson = JSON.stringify(argsObj || {})
+                .replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+            csInterface.evalScript("dispatchTool('" + toolName + "', '" + argsJson + "')", function(result) {
+                if (result === 'EvalScript_ErrMessage' || !result) {
+                    resolve({ error: 'tool dispatch failed' });
+                } else {
+                    try { resolve(JSON.parse(result)); }
+                    catch(e) { resolve({ error: 'tool result parse failed: ' + e.message }); }
+                }
+            });
+        });
+    });
+}
+
 function undoInAE() {
     return loadJSX().then(function() {
         return new Promise(function(resolve, reject) {

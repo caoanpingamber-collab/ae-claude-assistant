@@ -70,8 +70,8 @@
         </div>
 
         <div id="input-area">
-            <input type="file" id="image-input" accept="image/*" multiple style="display:none">
-            <button id="upload-btn" title="上传图片" class="icon-btn">
+            <input type="file" id="image-input" accept="image/*,video/*" multiple style="display:none">
+            <button id="upload-btn" title="上传图片或视频（视频会自动抽取6帧）" class="icon-btn">
                 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 17.93 8.78l-8.49 8.49a2 2 0 1 1-2.83-2.83l6.36-6.36"/></svg>
             </button>
             <textarea id="user-input" placeholder="描述你想要的动画效果，可粘贴或上传图片..." rows="1"></textarea>

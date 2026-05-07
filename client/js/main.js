@@ -4,6 +4,7 @@
     var lastGeneratedCode = null;
     var isProcessing = false;
     var pendingImages = []; // {data: base64, mediaType: 'image/png', dataUrl: 'data:...'}
+    var pendingVideoSummaries = []; // strings, prepended to next user message
 
     var chatHistory = document.getElementById('chat-history');
     var userInput = document.getElementById('user-input');
@@ -31,6 +32,69 @@
     apiEndpointInput.value = getApiEndpoint();
     apiKeyInput.value = getApiKey();
     modelSelect.value = getModel();
+
+    // Chat log: in-memory mirror of persisted chat history
+    var chatLog = getChatLog();
+
+    function persistChatLog() {
+        setChatLog(chatLog);
+    }
+
+    function logEntry(entry) {
+        chatLog.push(entry);
+        // Cap at 100 entries to keep localStorage manageable
+        if (chatLog.length > 100) {
+            chatLog = chatLog.slice(-100);
+        }
+        persistChatLog();
+    }
+
+    // Restore previous chat on panel load
+    function restoreChat() {
+        if (!chatLog || chatLog.length === 0) return;
+        var welcome = chatHistory.querySelector('.welcome');
+        if (welcome) welcome.remove();
+        for (var i = 0; i < chatLog.length; i++) {
+            var e = chatLog[i];
+            if (e.type === 'user') {
+                renderUserMessage(e.text, e.images || []);
+            } else if (e.type === 'assistant') {
+                renderMessage('assistant', e.text);
+            } else if (e.type === 'error') {
+                renderMessage('error', e.text);
+            } else if (e.type === 'system') {
+                renderMessage('system', e.text);
+            }
+        }
+        // Restore Claude conversation messages too (for API context)
+        if (typeof restoreConversationMessages === 'function') {
+            restoreConversationMessages(getConversationMessages());
+        }
+    }
+
+    // CEP doesn't natively support Cmd/Ctrl+C outside form fields.
+    // Manually copy the current selection when pressing the shortcut.
+    document.addEventListener('keydown', function(e) {
+        var isCopy = (e.metaKey || e.ctrlKey) && (e.key === 'c' || e.key === 'C');
+        if (!isCopy) return;
+        // Don't interfere with native copy in editable fields
+        var tag = (e.target.tagName || '').toLowerCase();
+        if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
+
+        var sel = window.getSelection();
+        if (!sel || sel.isCollapsed || !sel.toString()) return;
+
+        var text = sel.toString();
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); } catch(err) {}
+        document.body.removeChild(ta);
+        e.preventDefault();
+    });
 
     // Auto-resize textarea (capped at 120px, content scrolls beyond that)
     function resizeTextarea() {
@@ -244,7 +308,9 @@
     clearBtn.addEventListener('click', function() {
         chatHistory.innerHTML = '';
         resetConversation();
-        clearConversationHistory();
+        clearChatLog();
+        clearConversationMessages();
+        chatLog = [];
         hideCodePreview();
         clearPendingImages();
         appendWelcome();
@@ -309,19 +375,22 @@
     // Clear all images
     clearImagesBtn.addEventListener('click', clearPendingImages);
 
-    // Paste image from clipboard, plus re-trigger resize for text paste
+    function isMediaFile(type) {
+        return type && (type.indexOf('image') === 0 || type.indexOf('video') === 0);
+    }
+
+    // Paste media from clipboard, plus re-trigger resize for text paste
     userInput.addEventListener('paste', function(e) {
         var items = e.clipboardData && e.clipboardData.items;
         if (items) {
             for (var i = 0; i < items.length; i++) {
-                if (items[i].type.indexOf('image') !== -1) {
+                if (isMediaFile(items[i].type)) {
                     e.preventDefault();
                     addImageFile(items[i].getAsFile());
                     return;
                 }
             }
         }
-        // Re-clamp textarea height after the pasted text has been inserted
         setTimeout(resizeTextarea, 0);
     });
 
@@ -342,7 +411,7 @@
         appEl.style.outline = 'none';
         var files = e.dataTransfer.files;
         for (var i = 0; i < files.length; i++) {
-            if (files[i].type.indexOf('image') !== -1) {
+            if (isMediaFile(files[i].type)) {
                 addImageFile(files[i]);
             }
         }
@@ -360,23 +429,165 @@
     });
 
     function addImageFile(file) {
-        if (!file || file.type.indexOf('image') === -1) return;
+        if (!file) return;
+        if (file.type.indexOf('image') === 0) {
+            addPureImageFile(file);
+        } else if (file.type.indexOf('video') === 0) {
+            addVideoFile(file);
+        }
+    }
 
+    function addPureImageFile(file) {
         var reader = new FileReader();
         reader.onload = function(e) {
             var dataUrl = e.target.result;
             var base64 = dataUrl.split(',')[1];
             var mediaType = file.type || 'image/png';
-
             pendingImages.push({
                 data: base64,
                 mediaType: mediaType,
                 dataUrl: dataUrl
             });
-
             renderImagePreviews();
         };
         reader.readAsDataURL(file);
+    }
+
+    // Extract frames from a video. Cover frame is shown immediately;
+    // remaining frames + summary happen in the background.
+    function addVideoFile(file) {
+        var FRAME_COUNT = 6;
+        var MAX_WIDTH = 1024;
+
+        var url = URL.createObjectURL(file);
+        var video = document.createElement('video');
+        video.preload = 'auto';
+        video.muted = true;
+        video.playsInline = true;
+        video.src = url;
+
+        video.addEventListener('loadedmetadata', function() {
+            var duration = video.duration;
+            if (!duration || !isFinite(duration) || duration <= 0) {
+                URL.revokeObjectURL(url);
+                appendMessage('error', '视频元数据读取失败');
+                return;
+            }
+
+            var w = video.videoWidth || 640;
+            var h = video.videoHeight || 360;
+            var scale = Math.min(1, MAX_WIDTH / w);
+            var canvas = document.createElement('canvas');
+            canvas.width = Math.round(w * scale);
+            canvas.height = Math.round(h * scale);
+            var ctx = canvas.getContext('2d');
+
+            var times = [];
+            for (var k = 0; k < FRAME_COUNT; k++) {
+                times.push(duration * (k + 0.5) / FRAME_COUNT);
+            }
+            // Reorder so middle frame goes first (becomes cover quickly)
+            var midIdx = Math.floor(FRAME_COUNT / 2);
+            var captureOrder = [midIdx];
+            for (var n = 0; n < FRAME_COUNT; n++) {
+                if (n !== midIdx) captureOrder.push(n);
+            }
+
+            var frames = new Array(FRAME_COUNT);
+            var captured = 0;
+            var orderIdx = 0;
+            var coverPlaceholder = null;
+
+            function captureFrameAtSlot(slot, isFirst) {
+                return new Promise(function(resolve) {
+                    var onSeek = function() {
+                        video.removeEventListener('seeked', onSeek);
+                        try {
+                            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                            var dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+                            var base64 = dataUrl.split(',')[1];
+                            frames[slot] = {
+                                data: base64,
+                                mediaType: 'image/jpeg',
+                                dataUrl: dataUrl
+                            };
+                            captured++;
+
+                            if (isFirst) {
+                                // Show cover immediately
+                                coverPlaceholder = {
+                                    data: base64,
+                                    mediaType: 'image/jpeg',
+                                    dataUrl: dataUrl,
+                                    isVideoCover: true,
+                                    videoDuration: duration,
+                                    videoSummaryPending: true
+                                };
+                                pendingImages.push(coverPlaceholder);
+                                renderImagePreviews();
+                            }
+                            resolve();
+                        } catch (err) {
+                            resolve();
+                        }
+                    };
+                    video.addEventListener('seeked', onSeek);
+                    video.currentTime = times[slot];
+                });
+            }
+
+            // Capture middle frame first (cover), then chain the rest
+            captureFrameAtSlot(captureOrder[0], true).then(function() {
+                var chain = Promise.resolve();
+                for (var p = 1; p < captureOrder.length; p++) {
+                    (function(slot) {
+                        chain = chain.then(function() { return captureFrameAtSlot(slot, false); });
+                    })(captureOrder[p]);
+                }
+                chain.then(function() {
+                    URL.revokeObjectURL(url);
+                    var orderedFrames = frames.filter(function(f) { return f; });
+                    if (coverPlaceholder) {
+                        summarizeVideoBackground(orderedFrames, times, duration, coverPlaceholder);
+                    }
+                });
+            });
+        });
+
+        video.addEventListener('error', function() {
+            URL.revokeObjectURL(url);
+            appendMessage('error', '视频加载失败 (格式可能不支持)');
+        });
+    }
+
+    function summarizeVideoBackground(frames, times, duration, coverPlaceholder) {
+        var apiKey = getApiKey();
+        if (!apiKey) {
+            coverPlaceholder.videoSummaryPending = false;
+            coverPlaceholder.videoSummaryError = '未设置 API 密钥';
+            renderImagePreviews();
+            return;
+        }
+
+        var prompt = '下面是从一段时长 ' + duration.toFixed(2) + ' 秒的视频中均匀抽取的 ' +
+            frames.length + ' 帧画面。时间戳分别为：' +
+            times.map(function(t) { return t.toFixed(2) + 's'; }).join(', ') + '。\n\n' +
+            '请用中文按时间顺序简洁描述视频中发生的视觉变化、动作、运动方向、转场等关键信息。' +
+            '格式要求：每帧一行，"[时间戳] 描述"。最后用 1-2 句话总结整体动画意图。' +
+            '聚焦动效相关的细节（位置、缩放、旋转、出现/消失、颜色、形变等），便于后续在 AE 中复现。';
+
+        callClaudeOneShot(prompt, frames, apiKey, 'claude-haiku-4-5-20251001')
+            .then(function(summary) {
+                coverPlaceholder.videoSummary = summary;
+                coverPlaceholder.videoSummaryPending = false;
+                pendingVideoSummaries.push(summary);
+                renderImagePreviews();
+            })
+            .catch(function(err) {
+                coverPlaceholder.videoSummaryPending = false;
+                coverPlaceholder.videoSummaryError = err.message;
+                renderImagePreviews();
+            });
     }
 
     function renderImagePreviews() {
@@ -389,17 +600,45 @@
 
         for (var i = 0; i < pendingImages.length; i++) {
             (function(idx) {
+                var p = pendingImages[idx];
                 var thumb = document.createElement('div');
-                thumb.className = 'img-thumb';
+                thumb.className = 'img-thumb' + (p.isVideoCover ? ' video-cover' : '');
                 var img = document.createElement('img');
-                img.src = pendingImages[idx].dataUrl;
+                img.src = p.dataUrl;
                 thumb.appendChild(img);
+
+                if (p.isVideoCover) {
+                    var badge = document.createElement('div');
+                    badge.className = 'video-badge' + (p.videoSummaryPending ? ' pending' : '');
+                    if (p.videoSummaryPending) {
+                        badge.innerHTML = '<svg class="spinner" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>';
+                        badge.title = '正在理解视频时序...';
+                    } else if (p.videoSummaryError) {
+                        badge.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><polygon points="6,4 20,12 6,20"/></svg>';
+                        badge.title = '视频时序分析失败: ' + p.videoSummaryError + '（仍会发送封面图）';
+                        badge.style.background = 'rgba(229, 57, 53, 0.85)';
+                    } else {
+                        badge.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><polygon points="6,4 20,12 6,20"/></svg>';
+                        badge.title = '视频（' + (p.videoDuration ? p.videoDuration.toFixed(1) + 's' : '') + '）已分析时序';
+                    }
+                    thumb.appendChild(badge);
+                }
 
                 var removeBtn = document.createElement('button');
                 removeBtn.className = 'remove-img';
                 removeBtn.title = '移除';
                 removeBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
                 removeBtn.addEventListener('click', function() {
+                    if (pendingImages[idx] && pendingImages[idx].isVideoCover) {
+                        // Also drop the corresponding summary
+                        var videoCovers = 0;
+                        for (var k = 0; k <= idx; k++) {
+                            if (pendingImages[k] && pendingImages[k].isVideoCover) videoCovers++;
+                        }
+                        if (pendingVideoSummaries.length >= videoCovers) {
+                            pendingVideoSummaries.splice(videoCovers - 1, 1);
+                        }
+                    }
                     pendingImages.splice(idx, 1);
                     renderImagePreviews();
                 });
@@ -435,13 +674,23 @@
         // Show user message immediately
         appendUserMessage(message, pendingImages);
 
+        // Compose final message: prepend any video summaries as context
+        var finalMessage = message;
+        if (pendingVideoSummaries.length > 0) {
+            var videoCtx = pendingVideoSummaries.map(function(s, i) {
+                return '[视频 ' + (i + 1) + ' 的时序分析]\n' + s;
+            }).join('\n\n');
+            finalMessage = videoCtx + (message ? '\n\n[用户需求]\n' + message : '');
+        }
+
         var imagesToSend = pendingImages.slice();
         userInput.value = '';
         userInput.style.height = 'auto';
         clearPendingImages();
+        pendingVideoSummaries = [];
 
         // Queue the message
-        messageQueue.push({ message: message, images: imagesToSend });
+        messageQueue.push({ message: finalMessage, images: imagesToSend });
 
         if (isProcessing) {
             // Just show that it's queued; will process after current finishes
@@ -487,12 +736,21 @@
         var apiKey = getApiKey();
         isProcessing = true;
         hideCodePreview();
-        appendStatus('正在获取 AE 项目信息...');
+        appendStatus('收集合成与图层信息...');
+
+        var callbacks = {
+            onStatus: function(text) { updateLastSystemMessage(text); },
+            onToolCall: function(call) {
+                // Show as a permanent system note so user sees Claude's investigations
+                appendMessage('system', '🔍 Claude 调用工具：' + call.name +
+                    (call.args && Object.keys(call.args).length ? ' ' + JSON.stringify(call.args) : ''));
+            }
+        };
 
         getAEContext()
             .then(function(context) {
-                updateLastSystemMessage('正在请求 Claude 生成代码...');
-                return callClaudeAPI(combinedMessage, context, apiKey, getModel(), combinedImages);
+                updateLastSystemMessage('上下文已就绪，连接 Claude...');
+                return callClaudeAPI(combinedMessage, context, apiKey, getModel(), combinedImages, callbacks);
             })
             .then(function(response) {
                 removeLastSystemMessage();
@@ -529,38 +787,97 @@
             });
     }
 
+    var autoRetryAttempts = 0;
+    var MAX_AUTO_RETRIES = 2;
+
     function handleExecute() {
         if (!lastGeneratedCode) return;
+        autoRetryAttempts = 0;
+        executeWithAutoRetry(lastGeneratedCode);
+    }
 
-        var codeBeingExecuted = lastGeneratedCode;
+    function executeWithAutoRetry(code) {
         executeBtn.disabled = true;
         appendStatus('正在执行代码...');
 
-        executeInAE(lastGeneratedCode)
+        executeInAE(code)
             .then(function(result) {
                 removeLastSystemMessage();
                 if (result.success) {
                     appendMessage('system', '执行成功' + (result.result !== 'OK' ? ': ' + result.result : ''));
+                    autoRetryAttempts = 0;
+                    hideCodePreview();
                 } else {
-                    appendErrorWithFixButton(
-                        '执行失败: ' + result.error + (result.line ? ' (行 ' + result.line + ')' : ''),
-                        codeBeingExecuted,
-                        result.error,
-                        result.line
-                    );
+                    if (autoRetryAttempts < MAX_AUTO_RETRIES) {
+                        autoRetryAttempts++;
+                        appendMessage('error', '执行失败 (将自动重试 ' + autoRetryAttempts + '/' + MAX_AUTO_RETRIES + '): ' + result.error + (result.line ? ' (行 ' + result.line + ')' : ''));
+                        autoFixViaClaud(code, result.error, result.line);
+                    } else {
+                        autoRetryAttempts = 0;
+                        appendErrorWithFixButton(
+                            '执行失败 (自动重试 ' + MAX_AUTO_RETRIES + ' 次后仍失败): ' + result.error + (result.line ? ' (行 ' + result.line + ')' : ''),
+                            code, result.error, result.line
+                        );
+                        hideCodePreview();
+                    }
                 }
             })
             .catch(function(err) {
                 removeLastSystemMessage();
                 appendMessage('error', '执行出错: ' + err.message);
+                hideCodePreview();
             })
             .then(function() {
                 executeBtn.disabled = false;
-                hideCodePreview();
             });
     }
 
-    function appendMessage(type, text) {
+    function autoFixViaClaud(failedCode, errorMsg, errorLine) {
+        var apiKey = getApiKey();
+        if (!apiKey) return;
+
+        appendStatus('Claude 正在分析错误并修复...');
+
+        var fixMsg = '上一段代码执行失败：\n错误: ' + errorMsg +
+            (errorLine ? '\n位置: 行 ' + errorLine : '') +
+            '\n\n失败的代码：\n```javascript\n' + failedCode + '\n```\n\n' +
+            '请用 query_layer / query_effect 工具调查实际状态，找出真正原因，给出修复后的完整代码。';
+
+        var callbacks = {
+            onStatus: function(text) { updateLastSystemMessage(text); },
+            onToolCall: function(call) {
+                appendMessage('system', '🔍 Claude 调用工具：' + call.name +
+                    (call.args && Object.keys(call.args).length ? ' ' + JSON.stringify(call.args) : ''));
+            }
+        };
+
+        getAEContext()
+            .then(function(ctx) {
+                return callClaudeAPI(fixMsg, ctx, apiKey, getModel(), [], callbacks);
+            })
+            .then(function(response) {
+                removeLastSystemMessage();
+                var code = extractCode(response);
+                var displayText = response.replace(/```(?:javascript|jsx|extendscript)?\s*\n?[\s\S]*?```/g, '').trim();
+                if (displayText) appendMessage('assistant', displayText);
+                if (code) {
+                    lastGeneratedCode = code;
+                    showCodePreview(code);
+                    // Recursively retry execution
+                    executeWithAutoRetry(code);
+                } else {
+                    appendMessage('error', 'Claude 未返回可执行代码，自动重试中止');
+                    autoRetryAttempts = 0;
+                }
+            })
+            .catch(function(err) {
+                removeLastSystemMessage();
+                appendMessage('error', '自动修复失败: ' + err.message);
+                autoRetryAttempts = 0;
+            });
+    }
+
+    function renderMessage(type, text) {
         var div = document.createElement('div');
         div.className = 'message ' + type;
         var bubble = document.createElement('div');
@@ -569,6 +886,12 @@
         div.appendChild(bubble);
         chatHistory.appendChild(div);
         scrollToBottom();
+    }
+
+    function appendMessage(type, text) {
+        renderMessage(type, text);
+        // Persist to chat log (skip transient status messages — those use appendStatus)
+        logEntry({ type: type, text: text });
     }
 
     function appendErrorWithFixButton(errorText, failedCode, errorMsg, errorLine) {
@@ -599,7 +922,7 @@
         scrollToBottom();
     }
 
-    function appendUserMessage(text, images) {
+    function renderUserMessage(text, images) {
         var div = document.createElement('div');
         div.className = 'message user';
         var bubble = document.createElement('div');
@@ -623,6 +946,15 @@
         div.appendChild(bubble);
         chatHistory.appendChild(div);
         scrollToBottom();
+    }
+
+    function appendUserMessage(text, images) {
+        renderUserMessage(text, images);
+        // Persist (only keep dataUrl for image preview rendering, skip raw base64 to save space)
+        var imgRefs = (images || []).map(function(img) {
+            return { dataUrl: img.dataUrl, mediaType: img.mediaType };
+        });
+        logEntry({ type: 'user', text: text, images: imgRefs });
     }
 
     function appendWelcome() {
@@ -691,4 +1023,7 @@
         document.execCommand('copy');
         document.body.removeChild(textarea);
     }
+
+    // Restore previous chat (if any) on panel open
+    restoreChat();
 })();

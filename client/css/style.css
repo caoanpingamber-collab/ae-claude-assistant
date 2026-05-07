@@ -379,6 +379,39 @@ body {
     background: #e53935;
 }
 
+.img-thumb.video-cover img {
+    filter: brightness(0.7);
+}
+
+.img-thumb .video-badge {
+    position: absolute;
+    bottom: 2px;
+    left: 2px;
+    width: 16px;
+    height: 16px;
+    background: rgba(0, 0, 0, 0.7);
+    color: #fff;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1;
+}
+
+.img-thumb .video-badge svg {
+    width: 9px;
+    height: 9px;
+}
+
+.img-thumb .video-badge svg.spinner {
+    animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
 .img-thumb .remove-img svg {
     width: 10px;
     height: 10px;
