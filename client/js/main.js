@@ -5,6 +5,12 @@
     var isProcessing = false;
     var pendingImages = []; // {data: base64, mediaType: 'image/png', dataUrl: 'data:...'}
     var pendingVideoSummaries = []; // strings, prepended to next user message
+    var pendingFiles = []; // {name, content, lang} for text-like files (json/txt/code/extracted-zip)
+    // Per-file budget tuned to fit Anthropic's 1M-token context ceiling.
+    // ~3 chars/token for JSON, so 600KB of JSON ≈ 200K tokens; leave room for
+    // chat history + system prompt + tool calls.
+    var MAX_FILE_BYTES = 600 * 1024;            // 600KB per file
+    var MAX_TOTAL_FILE_BYTES = 1500 * 1024;     // 1.5MB total
 
     var chatHistory = document.getElementById('chat-history');
     var userInput = document.getElementById('user-input');
@@ -81,7 +87,7 @@
         for (var i = 0; i < chatLog.length; i++) {
             var e = chatLog[i];
             if (e.type === 'user') {
-                renderUserMessage(e.text, e.images || []);
+                renderUserMessage(e.text, e.images || [], e.files || []);
             } else if (e.type === 'assistant') {
                 renderMessage('assistant', e.text);
             } else if (e.type === 'error') {
@@ -398,7 +404,7 @@
     }
 
     function updateSendButton() {
-        var hasInput = userInput.value.trim().length > 0 || pendingImages.length > 0;
+        var hasInput = userInput.value.trim().length > 0 || pendingImages.length > 0 || pendingFiles.length > 0;
         if (isProcessing && !hasInput) {
             sendBtn.innerHTML = STOP_ICON;
             sendBtn.classList.add('stop-mode');
@@ -417,7 +423,7 @@
     }
 
     sendBtn.addEventListener('click', function() {
-        var hasInput = userInput.value.trim().length > 0 || pendingImages.length > 0;
+        var hasInput = userInput.value.trim().length > 0 || pendingImages.length > 0 || pendingFiles.length > 0;
         if (isProcessing && !hasInput) {
             // Cancel current task
             try { abortCurrentRequest(); } catch(e) {}
@@ -511,13 +517,47 @@
         e.preventDefault();
         e.stopPropagation();
         appEl.style.outline = 'none';
-        var files = e.dataTransfer.files;
-        for (var i = 0; i < files.length; i++) {
-            if (isMediaFile(files[i].type)) {
-                addImageFile(files[i]);
+
+        // Prefer DataTransferItem with webkitGetAsEntry for folder support
+        var items = e.dataTransfer.items;
+        if (items && items.length > 0 && items[0].webkitGetAsEntry) {
+            for (var i = 0; i < items.length; i++) {
+                var entry = items[i].webkitGetAsEntry();
+                if (entry) traverseEntry(entry);
+                else if (items[i].getAsFile) {
+                    var f = items[i].getAsFile();
+                    if (f) addImageFile(f);
+                }
             }
+            return;
         }
+
+        // Fallback
+        var files = e.dataTransfer.files;
+        for (var k = 0; k < files.length; k++) addImageFile(files[k]);
     });
+
+    // Recursively traverse a dropped folder, calling addImageFile on each file
+    function traverseEntry(entry, relPath) {
+        if (entry.isFile) {
+            entry.file(function(file) {
+                if (relPath) file._relPath = relPath; // hint for ZIP-like display
+                addImageFile(file);
+            });
+        } else if (entry.isDirectory) {
+            var reader = entry.createReader();
+            var newRel = (relPath ? relPath + '/' : '') + entry.name;
+            (function readBatch() {
+                reader.readEntries(function(entries) {
+                    if (!entries.length) return;
+                    for (var i = 0; i < entries.length; i++) {
+                        traverseEntry(entries[i], newRel);
+                    }
+                    readBatch();
+                });
+            })();
+        }
+    }
 
     // Preset buttons
     document.addEventListener('click', function(e) {
@@ -530,13 +570,186 @@
         }
     });
 
+    // Top-level entry: routes by file type. Renamed conceptually to addAnyFile
+    // but kept the old name for backwards compat (paste/drag/upload all call it).
     function addImageFile(file) {
         if (!file) return;
+        var name = file.name || '';
+        var lower = name.toLowerCase();
+
         if (file.type.indexOf('image') === 0) {
             addPureImageFile(file);
         } else if (file.type.indexOf('video') === 0) {
             addVideoFile(file);
+        } else if (lower.match(/\.zip$/i) || file.type === 'application/zip') {
+            addZipFile(file);
+        } else if (looksLikeTextFile(file)) {
+            addTextFile(file);
+        } else {
+            appendMessage('error', '不支持的文件类型: ' + name + ' (' + (file.type || '未知') + ')');
         }
+    }
+
+    function looksLikeTextFile(file) {
+        if (!file) return false;
+        if (file.type.indexOf('text') === 0) return true;
+        if (file.type === 'application/json') return true;
+        var name = (file.name || '').toLowerCase();
+        return /\.(json|txt|md|csv|log|js|jsx|ts|tsx|py|css|html|xml|yaml|yml|toml|aep|jsx|svg|sh|conf|ini)$/.test(name);
+    }
+
+    function langGuessFromName(name) {
+        var ext = (name.split('.').pop() || '').toLowerCase();
+        var map = { js: 'javascript', jsx: 'javascript', ts: 'typescript', tsx: 'typescript',
+            py: 'python', css: 'css', html: 'html', xml: 'xml', yaml: 'yaml', yml: 'yaml',
+            toml: 'toml', md: 'markdown', json: 'json', csv: 'csv', sh: 'bash' };
+        return map[ext] || '';
+    }
+
+    function totalPendingFileBytes() {
+        var total = 0;
+        for (var i = 0; i < pendingFiles.length; i++) total += (pendingFiles[i].content || '').length;
+        return total;
+    }
+
+    // Auto-minify JSON to reclaim 30-50% of bytes (Lottie JSON is mostly whitespace).
+    function maybeMinifyJSON(name, content) {
+        if (!/\.json$/i.test(name)) return content;
+        try {
+            var parsed = JSON.parse(content);
+            return JSON.stringify(parsed); // no spacing
+        } catch (e) {
+            return content; // not valid JSON, leave as-is
+        }
+    }
+
+    function fmtKB(b) {
+        return (b / 1024).toFixed(1) + 'KB';
+    }
+
+    function addTextFile(file) {
+        var reader = new FileReader();
+        reader.onload = function(e) {
+            var content = e.target.result;
+            var origSize = content.length;
+            content = maybeMinifyJSON(file.name, content);
+            var size = content.length;
+
+            if (size > MAX_FILE_BYTES) {
+                appendMessage('error',
+                    '文件 ' + file.name + ' 超过 ' + fmtKB(MAX_FILE_BYTES) +
+                    '，已跳过 (' + fmtKB(origSize) +
+                    (size < origSize ? ', 压缩后 ' + fmtKB(size) : '') + ')');
+                return;
+            }
+            if (totalPendingFileBytes() + size > MAX_TOTAL_FILE_BYTES) {
+                appendMessage('error',
+                    '已附文件总量超过 ' + fmtKB(MAX_TOTAL_FILE_BYTES) +
+                    '，' + file.name + ' 已跳过');
+                return;
+            }
+            pendingFiles.push({
+                name: file.name,
+                content: content,
+                lang: langGuessFromName(file.name),
+                size: size,
+                origSize: origSize
+            });
+            if (size < origSize) {
+                appendMessage('system',
+                    '已压缩 ' + file.name + '：' + fmtKB(origSize) + ' → ' + fmtKB(size));
+            }
+            renderImagePreviews();
+        };
+        reader.onerror = function() {
+            appendMessage('error', '读取失败: ' + file.name);
+        };
+        reader.readAsText(file);
+    }
+
+    // ZIP: write to tmp, unzip via shell, walk extracted dir, addFile each text file.
+    function addZipFile(file) {
+        try {
+            var fs = require('fs');
+            var os = require('os');
+            var path = require('path');
+            var child_process = require('child_process');
+
+            var reader = new FileReader();
+            reader.onload = function(e) {
+                var dataUrl = e.target.result;
+                var base64 = dataUrl.split(',')[1];
+                var bin = Buffer.from(base64, 'base64');
+
+                var tmpDir = path.join(os.tmpdir(), 'ae-zip-' + Date.now());
+                fs.mkdirSync(tmpDir, { recursive: true });
+                var zipPath = path.join(tmpDir, 'archive.zip');
+                fs.writeFileSync(zipPath, bin);
+
+                appendStatus('解压 ' + file.name + '...');
+                try {
+                    child_process.execSync('cd "' + tmpDir + '" && unzip -q archive.zip');
+                    fs.unlinkSync(zipPath);
+                } catch (err) {
+                    removeLastSystemMessage();
+                    appendMessage('error', '解压失败: ' + err.message);
+                    return;
+                }
+                removeLastSystemMessage();
+
+                walkAndAttach(tmpDir, file.name);
+            };
+            reader.readAsDataURL(file);
+        } catch (err) {
+            appendMessage('error', '解压不可用 (Node child_process 缺失): ' + err.message);
+        }
+    }
+
+    function walkAndAttach(rootDir, archiveName) {
+        var fs = require('fs');
+        var path = require('path');
+        var attached = 0, skipped = 0;
+
+        function walk(dir, relPath) {
+            var entries;
+            try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
+            catch (e) { return; }
+            for (var i = 0; i < entries.length; i++) {
+                var ent = entries[i];
+                var full = path.join(dir, ent.name);
+                var rel = relPath ? relPath + '/' + ent.name : ent.name;
+                // Skip hidden / metadata
+                if (ent.name.charAt(0) === '.') continue;
+                if (ent.name === '__MACOSX') continue;
+
+                if (ent.isDirectory()) {
+                    walk(full, rel);
+                } else {
+                    var stat;
+                    try { stat = fs.statSync(full); } catch (e) { continue; }
+                    if (stat.size > MAX_FILE_BYTES) { skipped++; continue; }
+                    if (totalPendingFileBytes() > MAX_TOTAL_FILE_BYTES) { skipped++; continue; }
+
+                    var ext = (rel.split('.').pop() || '').toLowerCase();
+                    var textExts = ['json','txt','md','csv','log','js','jsx','ts','tsx','py','css','html','xml','yaml','yml','toml','svg','sh','conf','ini'];
+                    if (textExts.indexOf(ext) === -1) { skipped++; continue; }
+
+                    try {
+                        var content = fs.readFileSync(full, 'utf8');
+                        pendingFiles.push({
+                            name: archiveName + '!/' + rel,
+                            content: content,
+                            lang: langGuessFromName(rel),
+                            size: stat.size
+                        });
+                        attached++;
+                    } catch (e) { skipped++; }
+                }
+            }
+        }
+        walk(rootDir, '');
+        renderImagePreviews();
+        appendMessage('system', '已附 ' + attached + ' 个文件' + (skipped > 0 ? '，跳过 ' + skipped + ' 个（超大/二进制）' : ''));
     }
 
     function addPureImageFile(file) {
@@ -699,11 +912,46 @@
             try { updateSendButton(); } catch(e) {}
         }
         imageThumbnails.innerHTML = '';
-        if (pendingImages.length === 0) {
+        var hasContent = pendingImages.length > 0 || pendingFiles.length > 0;
+        if (!hasContent) {
             imagePreviewBar.classList.add('hidden');
             return;
         }
         imagePreviewBar.classList.remove('hidden');
+
+        // File chips first (text/json/code/zip-extracted)
+        for (var fi = 0; fi < pendingFiles.length; fi++) {
+            (function(idx) {
+                var pf = pendingFiles[idx];
+                var chip = document.createElement('div');
+                chip.className = 'file-chip';
+                chip.title = pf.name + ' · ' + (pf.size > 1024 ? (pf.size / 1024).toFixed(1) + 'KB' : pf.size + ' B');
+
+                var icon = document.createElement('div');
+                icon.className = 'file-chip-icon';
+                icon.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
+                chip.appendChild(icon);
+
+                var label = document.createElement('span');
+                label.className = 'file-chip-name';
+                label.textContent = (pf.name.length > 20) ? pf.name.slice(0, 18) + '…' : pf.name;
+                chip.appendChild(label);
+
+                var rm = document.createElement('button');
+                rm.className = 'remove-img';
+                rm.title = '移除';
+                rm.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
+                rm.addEventListener('click', function() {
+                    pendingFiles.splice(idx, 1);
+                    renderImagePreviews();
+                });
+                chip.appendChild(rm);
+
+                imageThumbnails.appendChild(chip);
+            })(fi);
+        }
+
+        if (pendingImages.length === 0) return;
 
         for (var i = 0; i < pendingImages.length; i++) {
             (function(idx) {
@@ -750,6 +998,7 @@
 
     function clearPendingImages() {
         pendingImages = [];
+        pendingFiles = [];
         renderImagePreviews();
     }
 
@@ -757,7 +1006,7 @@
 
     function handleSend() {
         var message = userInput.value.trim();
-        if (!message && pendingImages.length === 0) return;
+        if (!message && pendingImages.length === 0 && pendingFiles.length === 0) return;
 
         var apiKey = getApiKey();
         if (!apiKey) {
@@ -770,8 +1019,8 @@
         var welcome = chatHistory.querySelector('.welcome');
         if (welcome) welcome.remove();
 
-        // Show user message immediately
-        appendUserMessage(message, pendingImages);
+        // Show user message immediately (include file pills so user can see what was attached)
+        appendUserMessage(message, pendingImages, pendingFiles);
 
         // Rebuild video summaries from pendingImages (single source of truth).
         // This avoids drift between pendingVideoSummaries and pendingImages
@@ -783,23 +1032,49 @@
             }
         }
 
-        // Compose final message: prepend video summaries as context
+        // Compose final message: prepend file contents + video summaries as context
         var finalMessage = message;
-        if (summariesNow.length > 0) {
-            var videoCtx = summariesNow.map(function(s, i) {
-                return '[视频 ' + (i + 1) + ' 的时序分析]\n' + s;
-            }).join('\n\n');
-            finalMessage = videoCtx + (message ? '\n\n[用户需求]\n' + message : '');
+        var prefixParts = [];
+
+        // Attached text files
+        for (var fi = 0; fi < pendingFiles.length; fi++) {
+            var pf = pendingFiles[fi];
+            prefixParts.push('[附件文件: ' + pf.name + ']\n```' + (pf.lang || '') + '\n' + pf.content + '\n```');
+        }
+        // Video temporal summaries
+        for (var vi = 0; vi < summariesNow.length; vi++) {
+            prefixParts.push('[视频 ' + (vi + 1) + ' 的时序分析]\n' + summariesNow[vi]);
+        }
+
+        if (prefixParts.length > 0) {
+            var prefix = prefixParts.join('\n\n');
+            finalMessage = prefix + (message ? '\n\n[用户需求]\n' + message : '');
         }
 
         var imagesToSend = pendingImages.slice();
+
+        // Build a slim history version (no file/video content, just user text + brief tags).
+        // This is what gets persisted in conversationMessages so subsequent turns
+        // don't re-send the heavy attachment payload.
+        var historyTags = [];
+        if (pendingFiles.length > 0) {
+            var names = pendingFiles.map(function(f) { return f.name; }).join(', ');
+            historyTags.push('[已附文件: ' + names + ']');
+        }
+        if (summariesNow.length > 0) historyTags.push('[已附视频时序分析 ×' + summariesNow.length + ']');
+        var historyText = (message || '').trim();
+        if (historyTags.length > 0) {
+            historyText = (historyText ? historyText + ' ' : '') + historyTags.join(' ');
+        }
+        if (!historyText) historyText = '(已附图)';
+
         userInput.value = '';
         userInput.style.height = 'auto';
         clearPendingImages();
         pendingVideoSummaries = []; // legacy array, kept for compat but unused
 
-        // Queue the message
-        messageQueue.push({ message: finalMessage, images: imagesToSend });
+        // Queue the message — full version for API, slim version for history
+        messageQueue.push({ message: finalMessage, historyText: historyText, images: imagesToSend });
 
         if (isProcessing) {
             // Just show that it's queued; will process after current finishes
@@ -820,21 +1095,26 @@
         // Merge all queued messages into one combined request
         var items = messageQueue.splice(0, messageQueue.length);
         var combinedMessage;
+        var combinedHistory; // slim version (no file content) for conversation memory
         var combinedImages = [];
 
         if (items.length === 1) {
             combinedMessage = items[0].message;
+            combinedHistory = items[0].historyText || items[0].message;
             combinedImages = items[0].images;
         } else {
             // Multiple messages: combine as supplementary
             var parts = [items[0].message];
+            var hParts = [items[0].historyText || items[0].message];
             for (var i = 1; i < items.length; i++) {
                 parts.push('补充：' + items[i].message);
+                hParts.push('补充：' + (items[i].historyText || items[i].message));
                 for (var j = 0; j < items[i].images.length; j++) {
                     items[0].images.push(items[i].images[j]);
                 }
             }
             combinedMessage = parts.join('\n\n');
+            combinedHistory = hParts.join('\n\n');
             combinedImages = items[0].images;
             for (var k = 1; k < items.length; k++) {
                 for (var m = 0; m < items[k].images.length; m++) {
@@ -861,7 +1141,7 @@
         getAEContext()
             .then(function(context) {
                 updateLastSystemMessage('上下文已就绪，连接 Claude...');
-                return callClaudeAPI(combinedMessage, context, apiKey, getModel(), combinedImages, callbacks);
+                return callClaudeAPI(combinedMessage, context, apiKey, getModel(), combinedImages, callbacks, { historyText: combinedHistory });
             })
             .then(function(response) {
                 removeLastSystemMessage();
@@ -881,6 +1161,14 @@
 
                 if (code) {
                     code = sanitizeCode(code);
+                    var check = validateExtendScriptCode(code);
+                    if (!check.valid && validationRetries < MAX_VALIDATION_RETRIES) {
+                        validationRetries++;
+                        appendStatus('代码自检发现问题，让 Claude 自动修复 (' + validationRetries + '/' + MAX_VALIDATION_RETRIES + ')...');
+                        autoFixViaValidation(code, check.error, combinedMessage, combinedImages);
+                        return;
+                    }
+                    validationRetries = 0;
                     lastGeneratedCode = code;
                     showCodePreview(code);
                 }
@@ -1083,7 +1371,7 @@
         scrollToBottom();
     }
 
-    function renderUserMessage(text, images) {
+    function renderUserMessage(text, images, files) {
         var div = document.createElement('div');
         div.className = 'message user';
         var bubble = document.createElement('div');
@@ -1098,6 +1386,23 @@
             }
         }
 
+        if (files && files.length > 0) {
+            var filesWrap = document.createElement('div');
+            filesWrap.className = 'bubble-files';
+            for (var fi = 0; fi < files.length; fi++) {
+                var f = files[fi];
+                var pill = document.createElement('div');
+                pill.className = 'bubble-file-pill';
+                var sizeKB = f.size ? (f.size > 1024 ? (f.size / 1024).toFixed(1) + 'KB' : f.size + ' B') : '';
+                pill.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
+                var nm = document.createElement('span');
+                nm.textContent = f.name + (sizeKB ? ' · ' + sizeKB : '');
+                pill.appendChild(nm);
+                filesWrap.appendChild(pill);
+            }
+            bubble.appendChild(filesWrap);
+        }
+
         if (text) {
             var textNode = document.createElement('div');
             textNode.textContent = text;
@@ -1109,13 +1414,16 @@
         scrollToBottom();
     }
 
-    function appendUserMessage(text, images) {
-        renderUserMessage(text, images);
+    function appendUserMessage(text, images, files) {
+        renderUserMessage(text, images, files);
         // Persist (only keep dataUrl for image preview rendering, skip raw base64 to save space)
         var imgRefs = (images || []).map(function(img) {
             return { dataUrl: img.dataUrl, mediaType: img.mediaType };
         });
-        logEntry({ type: 'user', text: text, images: imgRefs });
+        var fileRefs = (files || []).map(function(f) {
+            return { name: f.name, size: f.size }; // skip content for log size
+        });
+        logEntry({ type: 'user', text: text, images: imgRefs, files: fileRefs });
     }
 
     function appendWelcome() {

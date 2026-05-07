@@ -166,13 +166,18 @@ function callClaudeOneShot(textPrompt, images, apiKey, model) {
 }
 
 // Main API call: routes to Anthropic or OpenAI-compatible based on provider setting.
-function callClaudeAPI(userMessage, aeContext, apiKey, model, images, callbacks) {
+// options.historyText (optional): override what gets stored in conversation history.
+//   Use this to keep heavy file attachments out of long-term history while still
+//   sending the full file content to THIS request.
+function callClaudeAPI(userMessage, aeContext, apiKey, model, images, callbacks, options) {
     callbacks = callbacks || {};
+    options = options || {};
     var status = callbacks.onStatus || function() {};
     var safeUserMessage = (userMessage && userMessage.trim()) ? userMessage : '(请参考附图)';
 
-    // Persistent history: text-only summary
-    conversationMessages.push({ role: 'user', content: safeUserMessage });
+    // Persistent history: short summary, NOT the full prompt with file contents.
+    var historyText = options.historyText || safeUserMessage;
+    conversationMessages.push({ role: 'user', content: historyText });
     if (conversationMessages.length > 10) conversationMessages = conversationMessages.slice(-10);
     conversationMessages = conversationMessages.filter(function(m) {
         if (typeof m.content === 'string') return m.content.trim().length > 0;
@@ -474,13 +479,45 @@ function sanitizeCode(code) {
     for (var i = 0; i < lines.length; i++) {
         var ln = lines[i].trim();
         if (!ln) continue;
-        // Skip lines that don't look like JS
-        if (/^["'][^"']+["']\s*:/.test(ln)) continue;          // "key": value
-        if (/[←→]/.test(ln)) continue;                          // arrows
-        if (/^[*#-]\s/.test(ln)) continue;                      // markdown
-        if (/^(注[:：]|提示|说明|备注)/.test(ln)) continue;     // Chinese annotations
+        // Skip lines that look like data fragments / annotations / non-JS
+        if (/^["'][^"']+["']\s*:/.test(ln)) continue;            // "key": value
+        if (/^[a-zA-Z_$][\w$]*\s*:\s*[\[\{0-9"-]/.test(ln)) continue; // identifier: [/ { / number / "
+        if (/^[\[\{]/.test(ln)) continue;                         // [ or { at start (data array/object)
+        if (/^[+-]?\d/.test(ln)) continue;                        // leading number (data)
+        if (/[←→]/.test(ln)) continue;                            // arrow annotation
+        if (/^[*#]\s/.test(ln)) continue;                         // markdown bullet/heading
+        if (/^\d+\.\s/.test(ln)) continue;                        // numbered list
+        if (/^>\s/.test(ln)) continue;                            // blockquote
+        if (/^(注[:：]|提示[:：]|说明[:：]|备注[:：])/.test(ln)) continue;
         firstJSIdx = i;
         break;
     }
     return lines.slice(firstJSIdx).join('\n');
+}
+
+// Pre-execution validator. Returns { valid, error } — error includes which rule fired.
+function validateExtendScriptCode(code) {
+    if (!code || !code.trim()) return { valid: false, error: '代码为空' };
+
+    // 1. Basic JS syntax via Function constructor (V8 — catches obvious errors)
+    try {
+        new Function(code);
+    } catch (e) {
+        return { valid: false, error: '语法错误: ' + e.message };
+    }
+
+    // 2. ES6+ anti-patterns ExtendScript will reject at runtime
+    if (/\blet\s+/.test(code)) return { valid: false, error: '使用了 let，ExtendScript (ES3) 不支持，请改 var' };
+    if (/\bconst\s+/.test(code)) return { valid: false, error: '使用了 const，请改 var' };
+    if (/=>/.test(code)) return { valid: false, error: '使用了箭头函数，请改成 function (...) { ... }' };
+    if (/`[^`]*\$\{/.test(code)) return { valid: false, error: '使用了模板字符串，请改成 + 字符串拼接' };
+    if (/\.\.\.[a-zA-Z_$]/.test(code)) return { valid: false, error: '使用了展开 / rest 运算符 (...)，ES3 不支持' };
+    if (/\.forEach\s*\(/.test(code)) return { valid: false, error: '使用了 Array.forEach，请改 for 循环' };
+    if (/\.map\s*\(\s*function|\.map\s*\(\s*\(/.test(code)) {
+        // map+function might be OK in newer ES3 implementations; flag only if combined w/ arrow
+    }
+    if (/\bclass\s+\w+/.test(code)) return { valid: false, error: '使用了 class 声明，ES3 不支持' };
+    if (/\basync\s+function|\bawait\s+/.test(code)) return { valid: false, error: '使用了 async/await，ES3 不支持' };
+
+    return { valid: true };
 }
