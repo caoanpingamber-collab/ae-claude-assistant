@@ -386,14 +386,52 @@
             });
     });
 
-    // Send message
-    sendBtn.addEventListener('click', handleSend);
+    // Send / cancel button
+    var SEND_ICON = '发送';
+    var STOP_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>';
+
+    function updateSendButton() {
+        var hasInput = userInput.value.trim().length > 0 || pendingImages.length > 0;
+        if (isProcessing && !hasInput) {
+            sendBtn.innerHTML = STOP_ICON;
+            sendBtn.classList.add('stop-mode');
+            sendBtn.title = '中止当前任务';
+        } else {
+            sendBtn.innerHTML = SEND_ICON;
+            sendBtn.classList.remove('stop-mode');
+            sendBtn.title = isProcessing ? '排队发送（当前任务结束后处理）' : '发送';
+        }
+    }
+
+    sendBtn.addEventListener('click', function() {
+        var hasInput = userInput.value.trim().length > 0 || pendingImages.length > 0;
+        if (isProcessing && !hasInput) {
+            // Cancel current task
+            try { abortCurrentRequest(); } catch(e) {}
+            messageQueue = [];
+            isProcessing = false;
+            removeAllStatusMessages();
+            appendMessage('system', '已中止当前任务');
+            updateSendButton();
+            return;
+        }
+        handleSend();
+    });
+
     userInput.addEventListener('keydown', function(e) {
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
             handleSend();
         }
     });
+
+    // Keep the button visual in sync with input content & processing state
+    userInput.addEventListener('input', updateSendButton);
+
+    function removeAllStatusMessages() {
+        var msgs = chatHistory.querySelectorAll('.message.system.status');
+        for (var i = 0; i < msgs.length; i++) msgs[i].remove();
+    }
 
     // Execute code
     executeBtn.addEventListener('click', handleExecute);
@@ -755,6 +793,7 @@
     function processQueue() {
         if (messageQueue.length === 0) {
             isProcessing = false;
+            updateSendButton();
             return;
         }
 
@@ -786,6 +825,7 @@
 
         var apiKey = getApiKey();
         isProcessing = true;
+        updateSendButton();
         hideCodePreview();
         appendStatus('收集合成与图层信息...');
 
@@ -820,6 +860,7 @@
                 }
 
                 if (code) {
+                    code = sanitizeCode(code);
                     lastGeneratedCode = code;
                     showCodePreview(code);
                 }
@@ -834,6 +875,7 @@
                     processQueue();
                 } else {
                     isProcessing = false;
+                    updateSendButton();
                 }
             });
     }
@@ -883,16 +925,59 @@
             });
     }
 
+    // Build a diagnostic checklist tailored to the error type, so retry has direction
+    function buildAutoFixPrompt(failedCode, errorMsg, errorLine) {
+        var hints = [];
+        var em = (errorMsg || '').toLowerCase();
+        var emRaw = errorMsg || '';
+
+        // Syntax error → likely non-JS content sneaked into code, or ES6 syntax leak
+        if (em.indexOf('syntax') !== -1 || emRaw.indexOf('应为') !== -1 || emRaw.indexOf('expected') !== -1) {
+            hints.push('● [SyntaxError 优先排查] 代码块第 ' + (errorLine || '?') + ' 行无法解析，可能原因（按概率排序）：');
+            hints.push('  1. 代码块开头夹杂了非 JS 内容（JSON 片段、"key": value 标注、← 箭头注释、Markdown 列表）。本次修复必须输出纯 JS，代码块里禁止任何标注或解释。');
+            hints.push('  2. ES6 语法泄漏：检查 let/const/箭头函数 (=>)/模板字符串 (`...`)/解构 ({a,b}=)/Array.forEach/map/filter；ExtendScript 是 ES3。');
+            hints.push('  3. 字符串里有未转义的引号或换行；中文标点（双引号、单引号、；）误用为 JS 语法。');
+            hints.push('  4. 缺少分号导致两条语句粘在一起。');
+        }
+
+        // Null reference → property/effect not found
+        if (em.indexOf('null') !== -1 || emRaw.indexOf('不是对象') !== -1) {
+            hints.push('● [TypeError null 排查]');
+            hints.push('  1. addProperty(matchName) 返回 null：matchName 拼写错误。先用 list_all_layers + query_effect 看实际可用的 matchName。');
+            hints.push('  2. layer.property("xxx") 返回 null：属性名错误。用 query_layer 看真实属性树。');
+            hints.push('  3. 选中图层为空：comp.selectedLayers.length 为 0。');
+            hints.push('  4. 找不到目标图层：用 list_all_layers 确认图层名拼写。');
+        }
+
+        // Range / index errors
+        if (em.indexOf('range') !== -1 || emRaw.indexOf('范围') !== -1 || emRaw.indexOf('索引') !== -1) {
+            hints.push('● [范围错误] 索引超界。AE 集合是 1-indexed (从 1 开始)，不是 0。检查 numProperties / numLayers 边界。');
+        }
+
+        // Type errors
+        if (em.indexOf('value') !== -1 || em.indexOf('参数') !== -1 || emRaw.indexOf('数组') !== -1) {
+            hints.push('● [值类型] setValue 传错类型。Position/Scale 必须是 [x,y] 数组；Opacity/Rotation 是数字。检查每个 setValueAtTime 的 value 形状。');
+        }
+
+        if (hints.length === 0) {
+            hints.push('● 通用排查：用 query_layer 看图层真实状态，对比代码假设的属性名/结构是否一致。');
+        }
+
+        return '上一段代码执行失败。\n\n' +
+            '错误信息：' + errorMsg + (errorLine ? ' (行 ' + errorLine + ')' : '') + '\n\n' +
+            '失败的代码：\n```javascript\n' + failedCode + '\n```\n\n' +
+            '诊断方向：\n' + hints.join('\n') + '\n\n' +
+            '请按上面的方向，先用 query_layer / query_effect / list_all_layers 工具调查实际状态（不要只看错误信息字面），定位真正原因，再给出修复后的完整代码。\n\n' +
+            '重要：代码块里只能是纯可执行的 JavaScript，禁止夹杂 JSON 片段、"key":value 标注、← 箭头说明、Markdown 列表、中文注释等任何非代码内容。所有解释放在代码块外面。';
+    }
+
     function autoFixViaClaud(failedCode, errorMsg, errorLine) {
         var apiKey = getApiKey();
         if (!apiKey) return;
 
         appendStatus('Claude 正在分析错误并修复...');
 
-        var fixMsg = '上一段代码执行失败：\n错误: ' + errorMsg +
-            (errorLine ? '\n位置: 行 ' + errorLine : '') +
-            '\n\n失败的代码：\n```javascript\n' + failedCode + '\n```\n\n' +
-            '请用 query_layer / query_effect 工具调查实际状态，找出真正原因，给出修复后的完整代码。';
+        var fixMsg = buildAutoFixPrompt(failedCode, errorMsg, errorLine);
 
         var callbacks = {
             onStatus: function(text) { updateLastSystemMessage(text); },
@@ -912,6 +997,7 @@
                 var displayText = response.replace(/```(?:javascript|jsx|extendscript)?\s*\n?[\s\S]*?```/g, '').trim();
                 if (displayText) appendMessage('assistant', displayText);
                 if (code) {
+                    code = sanitizeCode(code);
                     lastGeneratedCode = code;
                     showCodePreview(code);
                     // Recursively retry execution

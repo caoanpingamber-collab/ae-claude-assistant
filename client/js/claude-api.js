@@ -43,10 +43,16 @@ var SYSTEM_PROMPT = [
     '5. 读 textDocument 后修改属性（fontSize, text, font），必须重新 setValue 整个 textDocument',
     '6. 形状层是 ADBE Vector Group → Contents → ADBE Vector Shape - X，三层嵌套',
     '',
-    '【输出格式】',
-    '- 简短中文说明（2-3 行）+ 代码块（```javascript ... ```）',
+    '【输出格式 - 严格】',
+    '- 在代码块外面写中文说明（2-3 行）',
+    '- 代码块（```javascript ... ```）里只能是纯可执行的 JavaScript',
+    '- 严禁在代码块里夹杂以下内容（会导致 SyntaxError 行 1）：',
+    '  * "key": value 形式的 JSON 片段或键值标注',
+    '  * ← → 箭头注释或中文说明文字（要写注释只能用 // 或 /* */，且必须是合法 JS 注释）',
+    '  * Markdown 列表（- *）、标题（#）',
+    '  * "注:" "提示:" "说明:" 等中文标注（即使加了 // 也容易出错，最好放代码块外）',
     '- 代码自包含、可直接执行',
-    '- 头两行: var comp = app.project.activeItem; if (!(comp instanceof CompItem)) { alert("请先打开合成"); }',
+    '- 头两行: var comp = app.project.activeItem; if (!(comp instanceof CompItem)) { alert("请先打开合成"); return; }',
     '- 主逻辑用 try-catch 包裹，失败给出具体中文错误（不要用 "出错了" 这种泛泛提示）',
     '- 系统会自动 beginUndoGroup/endUndoGroup，你不需要写',
     '',
@@ -413,7 +419,51 @@ function extractCode(responseText) {
         matches.push(m[1].trim());
     }
     if (matches.length === 0) return null;
-    if (matches.length === 1) return matches[0];
-    // Multiple blocks: concatenate (helper + main, etc.)
-    return matches.join('\n\n');
+
+    // Score each block by "JS-ness": penalize blocks that look like JSON/annotations
+    function scoreJS(code) {
+        if (!code) return -100;
+        var firstLine = (code.split('\n')[0] || '').trim();
+        var score = 0;
+        // Strong negative: starts with annotation arrow, JSON pair, markdown bullet
+        if (/^["'][^"']+["']\s*:/.test(firstLine)) score -= 50; // "key": value
+        if (/[←→]/.test(firstLine)) score -= 50;                // arrow annotation
+        if (/^[*#-]/.test(firstLine)) score -= 30;              // markdown
+        // Strong positive: valid JS starters
+        if (/^(var |function |if |for |while |\(function|app\.|comp\.|layer\.|\/\/|\/\*)/.test(firstLine)) score += 50;
+        if (code.indexOf('app.project') !== -1) score += 30;
+        if (code.indexOf('var ') !== -1) score += 20;
+        if (code.length > 100) score += 10;
+        return score;
+    }
+
+    // Pick the highest-scoring block; if multiple are JS-good, concat them
+    var scored = matches.map(function(c) { return { code: c, score: scoreJS(c) }; });
+    scored.sort(function(a, b) { return b.score - a.score; });
+
+    if (scored.length === 1) return scored[0].score >= 0 ? scored[0].code : null;
+
+    // Take all blocks scoring >= 0 (legitimate JS), concatenate in original order
+    var goodBlocks = matches.filter(function(c) { return scoreJS(c) >= 0; });
+    if (goodBlocks.length === 0) return null;
+    return goodBlocks.join('\n\n');
+}
+
+// Sanitize code defensively: strip leading non-JS lines (annotations, JSON snippets)
+function sanitizeCode(code) {
+    if (!code) return code;
+    var lines = code.split('\n');
+    var firstJSIdx = 0;
+    for (var i = 0; i < lines.length; i++) {
+        var ln = lines[i].trim();
+        if (!ln) continue;
+        // Skip lines that don't look like JS
+        if (/^["'][^"']+["']\s*:/.test(ln)) continue;          // "key": value
+        if (/[←→]/.test(ln)) continue;                          // arrows
+        if (/^[*#-]\s/.test(ln)) continue;                      // markdown
+        if (/^(注[:：]|提示|说明|备注)/.test(ln)) continue;     // Chinese annotations
+        firstJSIdx = i;
+        break;
+    }
+    return lines.slice(firstJSIdx).join('\n');
 }

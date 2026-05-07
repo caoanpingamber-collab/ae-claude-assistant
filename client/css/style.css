@@ -496,6 +496,7 @@ details.advanced[open] summary {
     border-color: #4A90D9;
 }
 
+
 #user-input {
     flex: 1;
     padding: 8px 10px;
@@ -546,12 +547,23 @@ details.advanced[open] summary {
     cursor: not-allowed;
 }
 
-#send-btn.processing {
-    background: #c0392b;
+#send-btn.stop-mode {
+    background: #e0e0e0;
+    color: #232323;
+    width: 36px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
 }
 
-#send-btn.processing:hover {
-    background: #e74c3c;
+#send-btn.stop-mode:hover {
+    background: #fff;
+    color: #000;
+}
+
+#send-btn.stop-mode svg {
+    display: block;
 }
 
 /* @ Mention Dropdown */

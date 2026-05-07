@@ -307,6 +307,83 @@ function tool_list_all_layers(args) {
     }
 }
 
+// === Tool: render current comp frame to PNG, return base64 inline ===
+// We read the PNG bytes and base64-encode in ExtendScript to avoid
+// cross-process filesystem reads that can fail with ENOENT.
+function _b64encode(bin) {
+    var chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    var out = "";
+    var len = bin.length;
+    for (var i = 0; i < len; i += 3) {
+        var b1 = bin.charCodeAt(i) & 0xff;
+        var b2 = (i + 1 < len) ? (bin.charCodeAt(i + 1) & 0xff) : 0;
+        var b3 = (i + 2 < len) ? (bin.charCodeAt(i + 2) & 0xff) : 0;
+        var t = (b1 << 16) | (b2 << 8) | b3;
+        out += chars.charAt((t >> 18) & 0x3f);
+        out += chars.charAt((t >> 12) & 0x3f);
+        out += (i + 1 < len) ? chars.charAt((t >> 6) & 0x3f) : '=';
+        out += (i + 2 < len) ? chars.charAt(t & 0x3f) : '=';
+    }
+    return out;
+}
+
+function tool_screenshot_comp(args) {
+    try {
+        var comp = app.project.activeItem;
+        if (!comp || !(comp instanceof CompItem)) {
+            return { error: "no active comp" };
+        }
+        var time = (args && typeof args.time === 'number') ? args.time : comp.time;
+
+        // Use system temp dir (no spaces, more reliable than userData on macOS)
+        var tmpFolder = new Folder(Folder.temp.fullName + "/ClaudeAEAssistant");
+        if (!tmpFolder.exists) {
+            try { tmpFolder.create(); } catch(e1) {}
+        }
+
+        var filePath = tmpFolder.fullName + "/ae-shot-" + (new Date().getTime()) + ".png";
+        var file = new File(filePath);
+
+        var savedFile;
+        try {
+            savedFile = comp.saveFrameToPng(time, file);
+        } catch(eSave) {
+            return { error: "saveFrameToPng 失败: " + eSave.toString() };
+        }
+
+        // saveFrameToPng might return the actual File written (canonical path)
+        var actualFile = (savedFile && savedFile instanceof File) ? savedFile : file;
+        if (!actualFile.exists) {
+            return { error: "PNG 文件未生成: " + actualFile.fsName };
+        }
+
+        // Read as binary
+        actualFile.encoding = "BINARY";
+        if (!actualFile.open("r")) {
+            return { error: "PNG 文件无法打开读取" };
+        }
+        var bin = actualFile.read();
+        actualFile.close();
+
+        // Cleanup temp file
+        try { actualFile.remove(); } catch(eRm) {}
+
+        var base64 = _b64encode(bin);
+
+        return {
+            success: true,
+            base64: base64,
+            mediaType: "image/png",
+            time: time,
+            comp: comp.name,
+            width: comp.width,
+            height: comp.height
+        };
+    } catch(e) {
+        return { error: e.toString() };
+    }
+}
+
 function dispatchTool(toolName, argsJson) {
     var args = {};
     try { args = JSON.parse(argsJson); } catch(e) {}
