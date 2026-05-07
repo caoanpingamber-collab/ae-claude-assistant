@@ -10,6 +10,8 @@
 
 ## 🚀 三步上手
 
+### 给人类用户
+
 ```bash
 git clone https://github.com/caoanpingamber-collab/ae-claude-assistant.git
 cd ae-claude-assistant
@@ -17,6 +19,31 @@ cd ae-claude-assistant
 ```
 
 **重启 AE**（Cmd+Q 后重开），打开 Window > Extensions > Claude AI 助手，点齿轮图标，**粘贴你的 API key**，结束。
+
+### 给 AI 客户端用户（让 Claude Code / Codex 帮你装）
+
+直接对你的 AI 客户端说：
+
+> 帮我装 https://github.com/caoanpingamber-collab/ae-claude-assistant 这个 AE 插件，并用我的 API key 配置好
+
+它会执行：
+
+```bash
+git clone https://github.com/caoanpingamber-collab/ae-claude-assistant.git
+cd ae-claude-assistant
+./install.sh
+./configure-key.sh           # 自动读取 env / 客户端配置 / 提示粘贴
+```
+
+`configure-key.sh` 的查找顺序：
+1. `--key sk-...` 命令行参数
+2. `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` 环境变量
+3. `~/.claude/settings.json` / `~/.codex/auth.json`
+4. 都没有就交互式提示粘贴
+
+写入到 `~/.ae-claude-assistant/config.json`，插件首次启动时自动读取，**用户不用打开设置面板手动粘贴**。
+
+> AI 客户端（Claude Code / Codex CLI）出于安全默认不会把自己的 OAuth token 给第三方脚本。如果环境变量没设、客户端配置里也没明文 key，AI 客户端会要求你手动粘一次（或选择走 auth2api 路径）。
 
 ## 🔑 API key 哪里来？
 

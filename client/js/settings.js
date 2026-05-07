@@ -67,6 +67,34 @@ function getDefaultEndpointForProvider(provider) {
     return 'https://api.anthropic.com';
 }
 
+// On panel init, if localStorage has no key, try reading ~/.ae-claude-assistant/config.json
+// This file is written by configure-key.sh and lets AI clients (Claude Code / Codex)
+// pre-populate the plugin without the user manually pasting.
+function loadConfigFileFallback() {
+    if (localStorage.getItem('claude_api_key')) return false; // already configured
+    if (!window.cep || !window.cep.fs) return false;
+
+    var home = '';
+    try { home = require('os').homedir(); } catch(e) { return false; }
+    var path = home + '/.ae-claude-assistant/config.json';
+
+    try {
+        var result = window.cep.fs.readFile(path);
+        if (result.err !== 0) return false;
+        var cfg = JSON.parse(result.data);
+        if (cfg.api_key) localStorage.setItem('claude_api_key', cfg.api_key);
+        if (cfg.provider) localStorage.setItem('claude_provider', cfg.provider);
+        if (cfg.api_endpoint) localStorage.setItem('claude_api_endpoint', cfg.api_endpoint);
+        if (cfg.model) localStorage.setItem('claude_model', cfg.model);
+        return true;
+    } catch(e) {
+        return false;
+    }
+}
+
+// Auto-run on script load
+loadConfigFileFallback();
+
 // One-shot smart configure: takes a raw API key, sets provider/endpoint/model automatically
 function smartConfigure(apiKey) {
     var provider = detectProviderFromKey(apiKey);
