@@ -1,7 +1,7 @@
 // settings.js - API key and preferences storage
 
 function getApiKey() {
-    return localStorage.getItem('claude_api_key') || 'sk-test-auth2api-local';
+    return localStorage.getItem('claude_api_key') || '';
 }
 
 function setApiKey(key) {
@@ -17,7 +17,7 @@ function setModel(model) {
 }
 
 function getApiEndpoint() {
-    return localStorage.getItem('claude_api_endpoint') || 'http://127.0.0.1:8317';
+    return localStorage.getItem('claude_api_endpoint') || 'https://api.anthropic.com';
 }
 
 function setApiEndpoint(endpoint) {
