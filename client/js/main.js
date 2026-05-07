@@ -595,7 +595,7 @@
         if (file.type.indexOf('text') === 0) return true;
         if (file.type === 'application/json') return true;
         var name = (file.name || '').toLowerCase();
-        return /\.(json|txt|md|csv|log|js|jsx|ts|tsx|py|css|html|xml|yaml|yml|toml|aep|jsx|svg|sh|conf|ini)$/.test(name);
+        return /\.(json|txt|md|csv|log|js|jsx|ts|tsx|py|css|html|xml|yaml|yml|toml|svg|sh|conf|ini)$/.test(name);
     }
 
     function langGuessFromName(name) {
@@ -677,27 +677,29 @@
 
             var reader = new FileReader();
             reader.onload = function(e) {
-                var dataUrl = e.target.result;
-                var base64 = dataUrl.split(',')[1];
-                var bin = Buffer.from(base64, 'base64');
-
-                var tmpDir = path.join(os.tmpdir(), 'ae-zip-' + Date.now());
-                fs.mkdirSync(tmpDir, { recursive: true });
-                var zipPath = path.join(tmpDir, 'archive.zip');
-                fs.writeFileSync(zipPath, bin);
-
                 appendStatus('解压 ' + file.name + '...');
                 try {
-                    child_process.execSync('cd "' + tmpDir + '" && unzip -q archive.zip');
+                    var dataUrl = e.target.result;
+                    var base64 = dataUrl.split(',')[1];
+                    var bin = Buffer.from(base64, 'base64');
+
+                    var tmpDir = path.join(os.tmpdir(), 'ae-zip-' + Date.now());
+                    fs.mkdirSync(tmpDir, { recursive: true });
+                    var zipPath = path.join(tmpDir, 'archive.zip');
+                    fs.writeFileSync(zipPath, bin);
+
+                    // execFileSync with cwd avoids shell injection on tmpDir
+                    child_process.execFileSync('unzip', ['-q', 'archive.zip'], { cwd: tmpDir });
                     fs.unlinkSync(zipPath);
+                    removeLastSystemMessage();
+                    walkAndAttach(tmpDir, file.name);
                 } catch (err) {
                     removeLastSystemMessage();
                     appendMessage('error', '解压失败: ' + err.message);
-                    return;
                 }
-                removeLastSystemMessage();
-
-                walkAndAttach(tmpDir, file.name);
+            };
+            reader.onerror = function() {
+                appendMessage('error', '读取 zip 失败: ' + file.name);
             };
             reader.readAsDataURL(file);
         } catch (err) {
@@ -1004,6 +1006,32 @@
 
     var messageQueue = [];
 
+    // Pre-execution code validation auto-fix state
+    var validationRetries = 0;
+    var MAX_VALIDATION_RETRIES = 1;
+
+    // When validation rejects generated code, silently re-prompt Claude with the
+    // error attached. Goes back through the queue so the existing isProcessing /
+    // abort lifecycle stays consistent.
+    function autoFixViaValidation(badCode, errMsg, originalApiMessage, originalImages) {
+        var fixPrompt =
+            '上一段生成的 ExtendScript 自检失败：' + errMsg + '\n\n' +
+            '请重写为合法的 ExtendScript (ES3) 代码，规则：\n' +
+            '- 用 var (不要 let/const)；不要箭头函数 / 模板字符串 / 解构 / spread / class / async\n' +
+            '- 数组遍历用 for 循环 (不要 forEach/map/filter)\n' +
+            '- 代码块只能是纯可执行的 JavaScript，禁止夹杂 JSON 数据片段、← 箭头、Markdown\n\n' +
+            '原始请求：\n' + (originalApiMessage || '(无)') + '\n\n' +
+            '上次的代码（不要照搬，请重写）：\n```javascript\n' + badCode + '\n```';
+
+        messageQueue.push({
+            message: fixPrompt,
+            historyText: '[自动修复 — 自检失败: ' + errMsg + ']',
+            images: originalImages || []
+        });
+
+        if (!isProcessing) processQueue();
+    }
+
     function handleSend() {
         var message = userInput.value.trim();
         if (!message && pendingImages.length === 0 && pendingFiles.length === 0) return;
@@ -1164,7 +1192,10 @@
                     var check = validateExtendScriptCode(code);
                     if (!check.valid && validationRetries < MAX_VALIDATION_RETRIES) {
                         validationRetries++;
-                        appendStatus('代码自检发现问题，让 Claude 自动修复 (' + validationRetries + '/' + MAX_VALIDATION_RETRIES + ')...');
+                        // Permanent system note (not a transient status) so the user
+                        // sees what happened; the next iteration appends its own
+                        // status messages independently.
+                        appendMessage('system', '🔁 代码自检失败 (' + check.error + ')，让 Claude 自动修复');
                         autoFixViaValidation(code, check.error, combinedMessage, combinedImages);
                         return;
                     }
