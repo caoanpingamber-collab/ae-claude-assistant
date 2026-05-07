@@ -32,11 +32,13 @@
     apiKeyInput.value = getApiKey();
     modelSelect.value = getModel();
 
-    // Auto-resize textarea
-    userInput.addEventListener('input', function() {
-        this.style.height = 'auto';
-        this.style.height = Math.min(this.scrollHeight, 120) + 'px';
-    });
+    // Auto-resize textarea (capped at 120px, content scrolls beyond that)
+    function resizeTextarea() {
+        userInput.style.height = '36px';
+        var h = Math.min(userInput.scrollHeight, 120);
+        userInput.style.height = h + 'px';
+    }
+    userInput.addEventListener('input', resizeTextarea);
 
     // @ mention dropdown
     var mentionDropdown = null;
@@ -60,14 +62,35 @@
         cachedLayers = null; // refresh layer list on next @
     }
 
+    function showMentionEmpty(message) {
+        var dd = getDropdown();
+        dd.innerHTML = '';
+        var item = document.createElement('div');
+        item.className = 'mention-empty';
+        item.textContent = message;
+        dd.appendChild(item);
+        var rect = userInput.getBoundingClientRect();
+        dd.style.left = rect.left + 'px';
+        dd.style.bottom = (window.innerHeight - rect.top + 4) + 'px';
+        dd.style.width = rect.width + 'px';
+        dd.classList.remove('hidden');
+        mentionLayers = [];
+    }
+
     function showMentionDropdown(layers, filter) {
         var dd = getDropdown();
+
+        if (!layers || layers.length === 0) {
+            showMentionEmpty('当前合成无图层（或未打开合成）');
+            return;
+        }
+
         var filtered = filter ? layers.filter(function(l) {
             return l.name.toLowerCase().indexOf(filter.toLowerCase()) !== -1;
         }) : layers.slice();
 
         if (filtered.length === 0) {
-            hideMentionDropdown();
+            showMentionEmpty('未找到匹配 "' + filter + '" 的图层');
             return;
         }
 
@@ -133,17 +156,19 @@
     var cachedLayers = null;
 
     function fetchAndShowMentions(filter) {
-        // Use cached layers if available (cached at @ trigger time)
         if (cachedLayers) {
             showMentionDropdown(cachedLayers, filter);
             return;
         }
+        showMentionEmpty('正在加载图层...');
         getAEContext().then(function(ctx) {
             cachedLayers = (ctx.allLayers || []).map(function(l) {
                 return { name: l.name, type: l.type };
             });
             showMentionDropdown(cachedLayers, filter);
-        }).catch(function() {});
+        }).catch(function(err) {
+            showMentionEmpty('加载失败: ' + (err && err.message ? err.message : '未知错误'));
+        });
     }
 
     userInput.addEventListener('input', function(e) {
@@ -154,8 +179,9 @@
         if (mentionStartPos === -1) {
             // Check if the char just typed was @
             if (caret > 0 && val.charAt(caret - 1) === '@') {
-                // Make sure @ is at start or preceded by whitespace
-                if (caret === 1 || /\s/.test(val.charAt(caret - 2))) {
+                // Trigger as long as @ isn't part of an email (preceded by alphanumeric)
+                var prevChar = caret >= 2 ? val.charAt(caret - 2) : '';
+                if (!/[A-Za-z0-9._-]/.test(prevChar)) {
                     mentionStartPos = caret - 1;
                     fetchAndShowMentions('');
                     return;
@@ -283,16 +309,20 @@
     // Clear all images
     clearImagesBtn.addEventListener('click', clearPendingImages);
 
-    // Paste image from clipboard
+    // Paste image from clipboard, plus re-trigger resize for text paste
     userInput.addEventListener('paste', function(e) {
         var items = e.clipboardData && e.clipboardData.items;
-        if (!items) return;
-        for (var i = 0; i < items.length; i++) {
-            if (items[i].type.indexOf('image') !== -1) {
-                e.preventDefault();
-                addImageFile(items[i].getAsFile());
+        if (items) {
+            for (var i = 0; i < items.length; i++) {
+                if (items[i].type.indexOf('image') !== -1) {
+                    e.preventDefault();
+                    addImageFile(items[i].getAsFile());
+                    return;
+                }
             }
         }
+        // Re-clamp textarea height after the pasted text has been inserted
+        setTimeout(resizeTextarea, 0);
     });
 
     // Drag and drop

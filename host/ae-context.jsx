@@ -1,7 +1,51 @@
 // ae-context.jsx - ExtendScript bridge for Claude AE Assistant
+// AE 2024+ ships native JSON via ExtendScript engine; if older AE without it,
+// inline a minimal polyfill (does not handle every edge case but covers our usage).
 
-// AE 16.0+ ships native JSON. json2.jsx self-guards against overwriting it.
-//@include "json2.jsx"
+if (typeof JSON === 'undefined') {
+    var JSON = {};
+    JSON.stringify = function (value) {
+        var t = typeof value;
+        if (t === 'string') {
+            var s = '';
+            for (var i = 0; i < value.length; i++) {
+                var c = value.charCodeAt(i);
+                var ch = value.charAt(i);
+                if (ch === '"') s += '\\"';
+                else if (ch === '\\') s += '\\\\';
+                else if (c === 0x08) s += '\\b';
+                else if (c === 0x09) s += '\\t';
+                else if (c === 0x0a) s += '\\n';
+                else if (c === 0x0c) s += '\\f';
+                else if (c === 0x0d) s += '\\r';
+                else if (c < 0x20) {
+                    var hex = c.toString(16);
+                    s += '\\u' + ('0000' + hex).slice(-4);
+                } else s += ch;
+            }
+            return '"' + s + '"';
+        }
+        if (t === 'number') return isFinite(value) ? String(value) : 'null';
+        if (t === 'boolean') return String(value);
+        if (value === null || value === undefined) return 'null';
+        if (value instanceof Array) {
+            var arr = [];
+            for (var k = 0; k < value.length; k++) arr.push(JSON.stringify(value[k]));
+            return '[' + arr.join(',') + ']';
+        }
+        if (t === 'object') {
+            var pairs = [];
+            for (var key in value) {
+                if (value.hasOwnProperty(key)) {
+                    var v = JSON.stringify(value[key]);
+                    if (v !== undefined) pairs.push(JSON.stringify(key) + ':' + v);
+                }
+            }
+            return '{' + pairs.join(',') + '}';
+        }
+        return undefined;
+    };
+}
 
 function getLayerType(layer) {
     try {
