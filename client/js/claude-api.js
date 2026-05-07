@@ -215,12 +215,20 @@ function runAnthropicToolLoop(history, aeContext, userMessage, images, apiKey, m
     return runToolLoop(requestMessages, apiKey, model, status, callbacks);
 }
 
+var MAX_ITERATIONS = 8;
+
 function runToolLoop(requestMessages, apiKey, model, status, callbacks) {
     var endpoint = getApiEndpoint();
     var iteration = 0;
-    var MAX_ITERATIONS = 8;
+
+    function checkAborted() {
+        if (!currentAbortController) {
+            throw new Error('__aborted__');
+        }
+    }
 
     function iterate() {
+        checkAborted();
         if (iteration >= MAX_ITERATIONS) {
             throw new Error('达到最大工具调用次数 (' + MAX_ITERATIONS + ')，已停止');
         }
@@ -257,6 +265,7 @@ function runToolLoop(requestMessages, apiKey, model, status, callbacks) {
             return r.json();
         })
         .then(function(data) {
+            checkAborted();
             // Save assistant message (with all blocks: thinking + tool_use + text)
             requestMessages.push({ role: 'assistant', content: data.content });
 
@@ -268,6 +277,7 @@ function runToolLoop(requestMessages, apiKey, model, status, callbacks) {
 
                 toolUseBlocks.forEach(function(tu) {
                     promiseChain = promiseChain.then(function() {
+                        checkAborted();
                         status('Claude 调用工具：' + tu.name + ' (' + JSON.stringify(tu.input) + ')');
                         return callTool(tu.name, tu.input).then(function(result) {
                             if (callbacks.onToolCall) {
@@ -283,6 +293,7 @@ function runToolLoop(requestMessages, apiKey, model, status, callbacks) {
                 });
 
                 return promiseChain.then(function() {
+                    checkAborted();
                     requestMessages.push({ role: 'user', content: toolResultsContent });
                     return iterate();
                 });
@@ -322,7 +333,10 @@ function openaiTools() {
 function runOpenAIToolLoop(history, aeContext, userMessage, images, apiKey, model, status, callbacks) {
     var endpoint = getApiEndpoint();
     var iteration = 0;
-    var MAX_ITERATIONS = 8;
+
+    function checkAborted() {
+        if (!currentAbortController) throw new Error('__aborted__');
+    }
 
     // Build initial messages: system + history (user/assistant text-only) + this turn (images + context + user)
     var msgs = [{ role: 'system', content: SYSTEM_PROMPT }];
@@ -332,7 +346,7 @@ function runOpenAIToolLoop(history, aeContext, userMessage, images, apiKey, mode
             role: historyMinusLast[h].role,
             content: typeof historyMinusLast[h].content === 'string'
                 ? historyMinusLast[h].content
-                : '(已省略历史多模态内容)'
+                : '[image omitted]'
         });
     }
     var thisTurn = [];
@@ -349,6 +363,7 @@ function runOpenAIToolLoop(history, aeContext, userMessage, images, apiKey, mode
     msgs.push({ role: 'user', content: thisTurn });
 
     function iterate() {
+        checkAborted();
         if (iteration >= MAX_ITERATIONS) {
             throw new Error('达到最大工具调用次数 (' + MAX_ITERATIONS + ')，已停止');
         }
@@ -378,6 +393,7 @@ function runOpenAIToolLoop(history, aeContext, userMessage, images, apiKey, mode
             return r.json();
         })
         .then(function(data) {
+            checkAborted();
             var msg = data.choices[0].message;
             // Echo assistant message back into context
             msgs.push(msg);
@@ -386,6 +402,7 @@ function runOpenAIToolLoop(history, aeContext, userMessage, images, apiKey, mode
                 var chain = Promise.resolve();
                 msg.tool_calls.forEach(function(tc) {
                     chain = chain.then(function() {
+                        checkAborted();
                         var args = {};
                         try { args = JSON.parse(tc.function.arguments); } catch(e) {}
                         status('AI 调用工具：' + tc.function.name + ' ' + tc.function.arguments);

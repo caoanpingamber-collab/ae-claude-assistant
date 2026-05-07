@@ -390,6 +390,13 @@
     var SEND_ICON = '发送';
     var STOP_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>';
 
+    function hasPendingVideoSummary() {
+        for (var i = 0; i < pendingImages.length; i++) {
+            if (pendingImages[i].videoSummaryPending) return true;
+        }
+        return false;
+    }
+
     function updateSendButton() {
         var hasInput = userInput.value.trim().length > 0 || pendingImages.length > 0;
         if (isProcessing && !hasInput) {
@@ -399,7 +406,13 @@
         } else {
             sendBtn.innerHTML = SEND_ICON;
             sendBtn.classList.remove('stop-mode');
-            sendBtn.title = isProcessing ? '排队发送（当前任务结束后处理）' : '发送';
+            if (isProcessing) {
+                sendBtn.title = '排队发送（当前任务结束后处理）';
+            } else if (hasPendingVideoSummary()) {
+                sendBtn.title = '视频时序还在分析中，立即发送将只附封面图（不含时序描述）';
+            } else {
+                sendBtn.title = '发送';
+            }
         }
     }
 
@@ -669,8 +682,9 @@
             .then(function(summary) {
                 coverPlaceholder.videoSummary = summary;
                 coverPlaceholder.videoSummaryPending = false;
-                pendingVideoSummaries.push(summary);
                 renderImagePreviews();
+                // Reflect summary readiness in the send button title (I4)
+                if (typeof updateSendButton === 'function') updateSendButton();
             })
             .catch(function(err) {
                 coverPlaceholder.videoSummaryPending = false;
@@ -680,6 +694,10 @@
     }
 
     function renderImagePreviews() {
+        // Sync button title (e.g. video summary still pending)
+        if (typeof updateSendButton === 'function') {
+            try { updateSendButton(); } catch(e) {}
+        }
         imageThumbnails.innerHTML = '';
         if (pendingImages.length === 0) {
             imagePreviewBar.classList.add('hidden');
@@ -718,16 +736,8 @@
                 removeBtn.title = '移除';
                 removeBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
                 removeBtn.addEventListener('click', function() {
-                    if (pendingImages[idx] && pendingImages[idx].isVideoCover) {
-                        // Also drop the corresponding summary
-                        var videoCovers = 0;
-                        for (var k = 0; k <= idx; k++) {
-                            if (pendingImages[k] && pendingImages[k].isVideoCover) videoCovers++;
-                        }
-                        if (pendingVideoSummaries.length >= videoCovers) {
-                            pendingVideoSummaries.splice(videoCovers - 1, 1);
-                        }
-                    }
+                    // Summary lives on the cover entry itself, so removing the
+                    // entry naturally drops it — no parallel array to sync.
                     pendingImages.splice(idx, 1);
                     renderImagePreviews();
                 });
@@ -763,10 +773,20 @@
         // Show user message immediately
         appendUserMessage(message, pendingImages);
 
-        // Compose final message: prepend any video summaries as context
+        // Rebuild video summaries from pendingImages (single source of truth).
+        // This avoids drift between pendingVideoSummaries and pendingImages
+        // when async summarization completes out of order.
+        var summariesNow = [];
+        for (var si = 0; si < pendingImages.length; si++) {
+            if (pendingImages[si].videoSummary) {
+                summariesNow.push(pendingImages[si].videoSummary);
+            }
+        }
+
+        // Compose final message: prepend video summaries as context
         var finalMessage = message;
-        if (pendingVideoSummaries.length > 0) {
-            var videoCtx = pendingVideoSummaries.map(function(s, i) {
+        if (summariesNow.length > 0) {
+            var videoCtx = summariesNow.map(function(s, i) {
                 return '[视频 ' + (i + 1) + ' 的时序分析]\n' + s;
             }).join('\n\n');
             finalMessage = videoCtx + (message ? '\n\n[用户需求]\n' + message : '');
@@ -776,7 +796,7 @@
         userInput.value = '';
         userInput.style.height = 'auto';
         clearPendingImages();
-        pendingVideoSummaries = [];
+        pendingVideoSummaries = []; // legacy array, kept for compat but unused
 
         // Queue the message
         messageQueue.push({ message: finalMessage, images: imagesToSend });
@@ -867,6 +887,10 @@
             })
             .catch(function(err) {
                 removeLastSystemMessage();
+                if (err && (err.message === '__aborted__' || err.name === 'AbortError')) {
+                    // User-initiated abort; status message + button reset already handled
+                    return;
+                }
                 appendMessage('error', '错误: ' + err.message);
             })
             .then(function() {
